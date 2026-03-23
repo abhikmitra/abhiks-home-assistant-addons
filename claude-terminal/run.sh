@@ -403,8 +403,8 @@ install_custom_integration() {
 
         # Log installed files
         bashio::log.info "  Files installed:"
-        ls -1 "$target_dir"/ 2>/dev/null | while IFS= read -r line; do
-            bashio::log.info "    - $line"
+        for f in "$target_dir"/*; do
+            [ -e "$f" ] && bashio::log.info "    - $(basename "$f")"
         done
 
         # Detect first install vs update

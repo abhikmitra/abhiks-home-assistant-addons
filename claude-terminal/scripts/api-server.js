@@ -17,6 +17,8 @@ const { spawn } = require('child_process');
 
 const API_PORT = 8099;
 const API_HOST = '0.0.0.0';
+const API_QUERY_PATH = '/api/query';
+const API_HEALTH_PATH = '/api/health';
 const CLAUDE_TIMEOUT_MS = 120_000; // 120 seconds
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX = 10;
@@ -222,7 +224,7 @@ function runClaude(args) {
         const proc = spawn('claude', args, {
             timeout: CLAUDE_TIMEOUT_MS,
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env },
+            env: process.env,
         });
 
         const stdoutChunks = [];
@@ -362,7 +364,7 @@ function handleHealth(_req, res) {
 function requestHandler(req, res) {
     const { method, url } = req;
 
-    if (method === 'POST' && url === '/api/query') {
+    if (method === 'POST' && url === API_QUERY_PATH) {
         handleQuery(req, res).catch((err) => {
             log('error', `Unhandled error in handleQuery: ${err.message}`);
             if (!res.headersSent) {
@@ -372,7 +374,7 @@ function requestHandler(req, res) {
         return;
     }
 
-    if (method === 'GET' && url === '/api/health') {
+    if (method === 'GET' && url === API_HEALTH_PATH) {
         handleHealth(req, res);
         return;
     }

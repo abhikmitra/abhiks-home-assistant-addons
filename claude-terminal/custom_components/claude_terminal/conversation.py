@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Literal
 
-import aiohttp
-
 from homeassistant.components.conversation import (
     ChatLog,
     ConversationEntity,
@@ -15,6 +13,7 @@ from homeassistant.components.conversation import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, intent
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import ClaudeTerminalAPI, ClaudeTerminalAPIError
@@ -28,10 +27,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up the conversation entity."""
     LOGGER.info("Setting up Claude Terminal conversation entity")
-    session = aiohttp.ClientSession()
+    session = async_get_clientsession(hass)
     api = ClaudeTerminalAPI(session)
     hass.data[DOMAIN]["api"] = api
-    hass.data[DOMAIN]["session"] = session
     async_add_entities([ClaudeTerminalConversationEntity(config_entry, api)])
     LOGGER.info("Claude Terminal conversation entity registered")
 
@@ -46,7 +44,6 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
         """Initialize the entity."""
         self._api = api
         self._attr_unique_id = f"{config_entry.entry_id}_conversation"
-        LOGGER.debug("ClaudeTerminalConversationEntity initialized")
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -80,6 +77,14 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
             LOGGER.warning("Failed to resolve device_id=%s", device_id, exc_info=True)
         return None
 
+    def _error_result(
+        self, language: str, conversation_id: str | None, message: str
+    ) -> ConversationResult:
+        """Build an error ConversationResult."""
+        response = intent.IntentResponse(language=language)
+        response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, message)
+        return ConversationResult(response=response, conversation_id=conversation_id)
+
     async def _async_handle_message(
         self,
         user_input: ConversationInput,
@@ -101,7 +106,6 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
             user_input.context.user_id if user_input.context else None,
         )
 
-        # Resolve names from IDs
         user_name = await self._resolve_user_name(
             user_input.context.user_id if user_input.context else None
         )
@@ -146,24 +150,16 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
             )
 
         except ClaudeTerminalAPIError as err:
-            LOGGER.error("Claude Terminal API error during conversation: %s (code=%s)", err, err.code)
-            response = intent.IntentResponse(language=user_input.language)
-            response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
+            LOGGER.error("Claude Terminal API error: %s (code=%s)", err, err.code)
+            return self._error_result(
+                user_input.language,
+                user_input.conversation_id,
                 f"Sorry, I couldn't process your request: {err}",
-            )
-            return ConversationResult(
-                response=response,
-                conversation_id=user_input.conversation_id,
             )
         except Exception:
             LOGGER.error("Unexpected error during conversation", exc_info=True)
-            response = intent.IntentResponse(language=user_input.language)
-            response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
+            return self._error_result(
+                user_input.language,
+                user_input.conversation_id,
                 "Sorry, an unexpected error occurred. Check the add-on logs for details.",
-            )
-            return ConversationResult(
-                response=response,
-                conversation_id=user_input.conversation_id,
             )
