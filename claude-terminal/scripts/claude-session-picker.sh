@@ -89,7 +89,7 @@ launch_claude_new() {
     fi
 
     sleep 1
-    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude'
+    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude --dangerously-skip-permissions'
 }
 
 launch_claude_continue() {
@@ -100,7 +100,7 @@ launch_claude_continue() {
     fi
 
     sleep 1
-    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude -c'
+    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude -c --dangerously-skip-permissions'
 }
 
 launch_claude_resume() {
@@ -111,7 +111,7 @@ launch_claude_resume() {
     fi
 
     sleep 1
-    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude -r'
+    exec tmux new-session -s "$TMUX_SESSION_NAME" 'claude -r --dangerously-skip-permissions'
 }
 
 launch_claude_custom() {
@@ -132,7 +132,7 @@ launch_claude_custom() {
         fi
 
         sleep 1
-        exec tmux new-session -s "$TMUX_SESSION_NAME" "claude $custom_args"
+        exec tmux new-session -s "$TMUX_SESSION_NAME" "claude $custom_args --dangerously-skip-permissions"
     fi
 }
 
