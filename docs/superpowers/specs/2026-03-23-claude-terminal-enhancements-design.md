@@ -62,7 +62,7 @@ Two components:
 
 ### API Server
 
-**File:** `claude-terminal/scripts/api-server.js`
+**File:** `claude-terminal/scripts/api-server.js` (uses Node.js built-in `http` module — no extra npm dependencies needed)
 **Port:** 8099 (internal, Supervisor network only)
 **Endpoint:** `POST /api/query`
 
@@ -121,9 +121,23 @@ Structure your output clearly as it will be consumed by automations.
 
 If `extra_system_prompt` is provided by HA (conversation only), it gets appended.
 
-If `conversation_id` is provided, adds `--resume <id>` to continue a prior conversation.
+**Multi-turn conversations:** If `conversation_id` is provided, adds `--resume <id>` to continue a prior conversation. Known limitation: `--resume` replays the full conversation history on each call, so latency and cost grow with each turn. To mitigate:
+- Cap at 10 turns per conversation, then start fresh
+- Use `--no-session-persistence` for AI Task calls (one-shot by nature)
+- Document as a known limitation for v2.3.0
 
-**Response:** Returns Claude's JSON directly — includes `result` (text), `session_id` (for follow-ups), `total_cost_usd`, and `usage`.
+**Response:** The API server extracts the response from Claude's JSON output:
+- For normal calls: reads the `result` field (text response)
+- For structured output (`--json-schema`): reads the `structured_output` field instead (`result` is empty when schema is used)
+- Always returns `session_id` for conversation continuity
+
+**Concurrency:** One request at a time. The API server queues incoming requests and processes them sequentially. Each `claude -p` process loads Node.js + Claude Code runtime, which is memory-intensive. On resource-constrained hardware (HA Green, 1GB RAM), concurrent processes would OOM. Additional requests receive a 503 with "busy" message.
+
+**Error handling:** If Claude fails (API key expired, rate limit, timeout, malformed response), the API server returns a structured error:
+```json
+{"error": true, "message": "Rate limited, please try again", "code": 429}
+```
+The custom integration catches these and returns a user-friendly `ConversationResult`/`GenDataTaskResult` (e.g., "I'm sorry, I couldn't process that request") while logging the actual error.
 
 **Timeout:** 120 seconds default.
 
@@ -138,8 +152,10 @@ If `conversation_id` is provided, adds `--resume <id>` to continue a prior conve
 - `manifest.json` — metadata (domain: `claude_terminal`, dependencies: `[hassio]`)
 - `config_flow.py` — simple "Add Integration" flow, no config needed
 - `conversation.py` — implements `ConversationEntity` with `_async_handle_message()`
-- `ai_task.py` — implements `AITaskEntity` with `_async_generate_data()`
+- `ai_task.py` — implements `AITaskEntity` with `_async_generate_data(task, chat_log)`
 - `const.py` — constants (addon URL, timeouts)
+
+**Design choice:** Both `_async_handle_message` and `_async_generate_data` receive a `ChatLog` parameter from HA. We intentionally bypass HA's built-in LLM conversation management — the integration does not use `chat_log` to manage context. Instead, all context is managed by Claude Code's own session system via `-p` and `--resume`. The `ChatLog` parameter is accepted but not used.
 
 **Conversation entity (`conversation.py`):**
 - Receives `ConversationInput` with: `text`, `context` (has `user_id`), `conversation_id`, `device_id`, `satellite_id`, `language`, `extra_system_prompt`
@@ -155,13 +171,14 @@ If `conversation_id` is provided, adds `--resume <id>` to continue a prior conve
 - Returns `GenDataTaskResult` with Claude's response and `session_id`
 - If `structure` is provided, passes `--json-schema` to Claude for structured output
 
-**Add-on hostname:** Within the HA Supervisor network, add-ons are addressable by their slug-based hostname. The integration discovers this at runtime via the Supervisor API.
+**Add-on hostname:** The HA Supervisor derives hostnames from the slug by replacing underscores with hyphens. Since slug is `claude_terminal`, the hostname is `claude-terminal`. The API URL is `http://claude-terminal:8099/api/query`. This is hardcoded in `const.py` as a fallback, with runtime discovery via the Supervisor API as the primary method.
 
 ### Auto-Installation
 
 **`run.sh`** — new `install_custom_integration()` function:
 - Copies `custom_components/claude_terminal/` to `/config/custom_components/claude_terminal/`
 - Only copies if files are missing or the add-on version has changed (checks a version marker file)
+- Always overwrites on version mismatch (ensures corrupted files get replaced on next add-on update)
 - Logs a notice on first install: "Please restart Home Assistant to load the Claude Terminal integration"
 
 ### Startup Flow Changes
@@ -182,7 +199,7 @@ Updated `main()` in `run.sh`:
 
 ### config.yaml Changes
 
-- Add port `8099/tcp` for the API server (Supervisor network, not user-facing)
+- Do NOT add port 8099 to `ports` — the `ports` section controls host-level port publishing, and adding it would expose the API externally. The port is already accessible on the internal Supervisor Docker bridge network without declaration.
 - Version bump: 2.2.0 → 2.3.0
 
 ## User-Facing Installation
@@ -198,10 +215,11 @@ The existing installation process does not change. For the new AI integration fe
 
 ```yaml
 action: ai_task.generate_data
+target:
+  entity_id: ai_task.claude_terminal
 data:
   task_name: "morning_briefing"
   instructions: "What lights are on and what's the temperature?"
-  entity_id: ai_task.claude_terminal
 ```
 
 ## Context Available to Claude
@@ -211,6 +229,21 @@ Claude `-p` calls (without `--bare`) load the same context as interactive sessio
 1. **`$HOME/CLAUDE.md`** — HA context generated by `ha-context.sh` (entity counts, installed add-ons, error logs, API examples)
 2. **ha-mcp server** — configured via `claude mcp add`, provides 97+ HA tools (entity control, automations, dashboards, etc.)
 3. **Dynamic system prompt** — source, user, device, time, language (built from trigger context)
+
+## API Server Resilience
+
+The API server runs as a background process before `exec ttyd`. Since `exec` replaces the shell, the API server must be self-sustaining:
+- Started with `node /opt/scripts/api-server.js &` (background job)
+- The server includes a self-restart mechanism: on uncaught exception, it logs the error and restarts after 5 seconds
+- A `GET /api/health` endpoint returns 200 if the server is alive (usable by HA for diagnostics)
+- If the entire container restarts (add-on restart), both ttyd and the API server restart via `run.sh`
+
+## Cost Safety
+
+Since `--dangerously-skip-permissions` is always on and the API server accepts requests from automations, a misconfigured automation could trigger expensive Claude calls in a loop. Mitigations:
+- API server enforces a rate limit: max 10 requests per minute (configurable later)
+- Consider adding `--max-budget-usd` to `-p` calls as a per-request safety cap (implementation can decide the default)
+- The conversation entity logs cost from Claude's response JSON for monitoring
 
 ## Verified Against
 
