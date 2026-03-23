@@ -34,6 +34,8 @@ init_environment() {
     # Claude-specific environment variables
     export ANTHROPIC_CONFIG_DIR="$claude_config_dir"
     export ANTHROPIC_HOME="/data"
+    # Enable experimental agent teams for multi-agent coordination
+    export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
     # Migrate any existing authentication files from legacy locations
     migrate_legacy_auth_files "$claude_config_dir"
@@ -50,6 +52,7 @@ init_environment() {
     bashio::log.info "  - Config: $XDG_CONFIG_HOME"
     bashio::log.info "  - Claude config: $ANTHROPIC_CONFIG_DIR"
     bashio::log.info "  - Cache: $XDG_CACHE_HOME"
+    bashio::log.info "  - Agent teams: enabled"
 }
 
 # One-time migration of existing authentication files
@@ -278,7 +281,7 @@ get_claude_launch_command() {
 
     if [ "$auto_launch_claude" = "true" ]; then
         # Use tmux for session persistence - attach to existing or create new
-        echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+        echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
     else
         # Session picker manages its own tmux sessions internally,
         # so do NOT wrap it in tmux (that would cause nested tmux errors)
@@ -287,7 +290,7 @@ get_claude_launch_command() {
         else
             # Fallback if session picker is missing
             bashio::log.warning "Session picker not found, falling back to auto-launch"
-            echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+            echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
         fi
     fi
 }
@@ -356,6 +359,99 @@ setup_ha_mcp() {
     fi
 }
 
+# Install custom integration for HA conversation agent and AI Task
+install_custom_integration() {
+    local source_dir="/opt/custom_components/claude_terminal"
+    local target_dir="/config/custom_components/claude_terminal"
+    local version_marker="$target_dir/.addon_version"
+    local addon_version
+
+    addon_version=$(bashio::addon.version 2>/dev/null || echo "unknown")
+
+    bashio::log.info "Checking Claude Terminal custom integration..."
+    bashio::log.info "  Add-on version: $addon_version"
+
+    if [ ! -d "$source_dir" ]; then
+        bashio::log.warning "Custom integration source not found at $source_dir, skipping"
+        return 0
+    fi
+
+    # Check if already installed with current version
+    if [ -f "$version_marker" ]; then
+        local installed_version
+        installed_version=$(cat "$version_marker" 2>/dev/null || echo "")
+        bashio::log.info "  Installed integration version: $installed_version"
+
+        if [ "$installed_version" = "$addon_version" ]; then
+            bashio::log.info "Custom integration already up to date (v$addon_version)"
+            return 0
+        fi
+        bashio::log.info "Version mismatch ($installed_version != $addon_version), updating integration..."
+    else
+        bashio::log.info "Custom integration not installed, performing first install..."
+    fi
+
+    # Ensure target directory exists
+    mkdir -p "/config/custom_components"
+
+    # Copy integration files (overwrite)
+    if cp -r "$source_dir" "/config/custom_components/"; then
+        # Write version marker
+        echo "$addon_version" > "$version_marker"
+        bashio::log.info "Custom integration installed/updated to v$addon_version"
+        bashio::log.info "  Installed to: $target_dir"
+
+        # Log installed files
+        bashio::log.info "  Files installed:"
+        for f in "$target_dir"/*; do
+            [ -e "$f" ] && bashio::log.info "    - $(basename "$f")"
+        done
+
+        # Detect first install vs update
+        if [ -z "${installed_version:-}" ]; then
+            bashio::log.warning "======================================================"
+            bashio::log.warning "  FIRST INSTALL: Please restart Home Assistant to"
+            bashio::log.warning "  load the Claude Terminal integration, then add it"
+            bashio::log.warning "  via Settings > Devices & Services > Add Integration"
+            bashio::log.warning "======================================================"
+        else
+            bashio::log.info "Integration updated from v$installed_version to v$addon_version"
+        fi
+    else
+        bashio::log.error "Failed to copy custom integration to $target_dir"
+    fi
+}
+
+# Start the API server for conversation/AI Task integration
+start_api_server() {
+    local api_script="/opt/scripts/api-server.js"
+
+    if [ ! -f "$api_script" ]; then
+        bashio::log.warning "API server script not found at $api_script, skipping"
+        return 0
+    fi
+
+    bashio::log.info "Starting Claude Terminal API server..."
+    bashio::log.info "  Script: $api_script"
+    bashio::log.info "  Port: 8099"
+    bashio::log.info "  Rate limit: 10 requests/minute"
+
+    # Start in background - output goes to container logs
+    node "$api_script" &
+    local api_pid=$!
+
+    bashio::log.info "API server started (PID: $api_pid)"
+
+    # Wait briefly and check it's still running
+    sleep 2
+    if kill -0 "$api_pid" 2>/dev/null; then
+        bashio::log.info "API server is running (PID: $api_pid)"
+    else
+        bashio::log.error "API server failed to start! Check logs above for errors."
+        bashio::log.error "Continuing without API server - conversation/AI Task will not work."
+    fi
+}
+
 # Main execution
 main() {
     bashio::log.info "Initializing Claude Terminal add-on..."
@@ -369,6 +465,8 @@ main() {
     install_persistent_packages
     generate_ha_context
     setup_ha_mcp
+    install_custom_integration
+    start_api_server
     start_web_terminal
 }
 

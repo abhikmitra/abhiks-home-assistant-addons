@@ -1,0 +1,10 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Claude Terminal",
+        "description": "Add Claude Terminal as a conversation agent and AI Task entity. Make sure the Claude Terminal add-on is installed and running."
+      }
+    }
+  }
+}

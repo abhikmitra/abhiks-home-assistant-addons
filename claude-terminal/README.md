@@ -28,6 +28,10 @@ This add-on provides a web-based terminal interface with Claude Code CLI pre-ins
 - **Secure Credential Management**: Persistent authentication with safe credential storage
 - **Automatic Recovery**: Built-in fallbacks and error handling for reliable operation
 - **Persistent Package Management**: Install APK and pip packages that survive container restarts
+- **AI Conversation Agent**: Use Claude as a Home Assistant conversation agent for voice and chat
+- **AI Task Entity**: Trigger Claude from automations and scripts
+- **Agent Teams**: Coordinate multiple Claude instances for complex tasks
+- **Bypass Permissions**: All commands run without permission prompts for seamless operation
 
 ## Quick Start
 
@@ -93,6 +97,51 @@ persistent_pip_packages:
 - **Authentication**: OAuth with Anthropic (credentials stored securely in `/data/.config/claude/`)
 - **Terminal**: Full bash environment with Claude Code CLI pre-installed
 - **Volumes**: Access to `/config` (Home Assistant configuration)
+
+## AI Assistant Integration
+
+Claude Terminal can act as a conversation agent and AI Task entity in Home Assistant, letting you use Claude from voice assistants, chat, and automations.
+
+### Setup
+
+After installing or updating the add-on:
+
+1. **Restart Home Assistant** (one-time, so HA picks up the new integration)
+2. Go to **Settings** → **Devices & Services** → **Add Integration**
+3. Search for **Claude Terminal** and add it
+
+### Use as a Voice Assistant
+
+Go to **Settings** → **Voice Assistants** and select Claude Terminal as your conversation agent. You can then use Claude through any voice satellite or the Assist panel.
+
+### Use in Automations
+
+```yaml
+action: ai_task.generate_data
+target:
+  entity_id: ai_task.claude_terminal
+data:
+  task_name: "morning_briefing"
+  instructions: "What lights are on and what's the temperature?"
+```
+
+### Agent Teams
+
+Claude Terminal supports experimental agent teams for coordinating multiple Claude instances on complex tasks. This is enabled automatically. In the terminal, ask Claude to create a team:
+
+```
+Create an agent team to review my automations. Spawn three reviewers:
+- One checking for redundant automations
+- One validating error handling
+- One reviewing performance
+```
+
+### Troubleshooting AI Integration
+
+- Check add-on logs for `[API]` prefixed messages for API server issues
+- Verify the add-on is running before using conversation/AI Task
+- If the integration doesn't appear, restart Home Assistant
+- Rate limit: max 10 requests per minute to prevent runaway automations
 
 ## Troubleshooting
 
