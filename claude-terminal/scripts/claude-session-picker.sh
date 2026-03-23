@@ -125,7 +125,7 @@ launch_claude_custom() {
         echo "No arguments provided. Starting default session..."
         launch_claude_new
     else
-        echo "🚀 Running: claude $custom_args"
+        echo "🚀 Running: claude $custom_args --dangerously-skip-permissions"
 
         if check_existing_session; then
             tmux kill-session -t "$TMUX_SESSION_NAME" 2>/dev/null

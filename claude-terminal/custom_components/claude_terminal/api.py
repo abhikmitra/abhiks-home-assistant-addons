@@ -85,7 +85,16 @@ class ClaudeTerminalAPI:
         try:
             timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
             async with self._session.post(url, json=payload, timeout=timeout) as resp:
-                data = await resp.json()
+                try:
+                    data = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError) as parse_err:
+                    LOGGER.error(
+                        "Claude Terminal API returned non-JSON response: status=%s, error=%s",
+                        resp.status, parse_err,
+                    )
+                    raise ClaudeTerminalAPIError(
+                        f"API returned non-JSON response (HTTP {resp.status})", resp.status
+                    ) from parse_err
 
                 if resp.status != 200:
                     error_msg = data.get("message", f"HTTP {resp.status}")

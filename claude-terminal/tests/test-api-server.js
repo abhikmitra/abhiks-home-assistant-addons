@@ -97,15 +97,20 @@ describe('buildSystemPrompt', () => {
 // -------------------------------------------------------------------------
 
 describe('buildClaudeArgs', () => {
-    it('always includes -p, query, --dangerously-skip-permissions, --output-format json', () => {
+    it('always includes -p, --, query, --dangerously-skip-permissions, --output-format json', () => {
         const args = buildClaudeArgs({ query: 'hello', context: {} });
 
         assert.ok(args.includes('-p'), 'should include -p');
+        assert.ok(args.includes('--'), 'should include -- separator before query');
         assert.ok(args.includes('hello'), 'should include the query');
         assert.ok(args.includes('--dangerously-skip-permissions'), 'should include permissions flag');
         assert.ok(args.includes('--output-format'), 'should include --output-format');
         const fmtIdx = args.indexOf('--output-format');
         assert.equal(args[fmtIdx + 1], 'json', 'output format should be json');
+        // Verify -- comes before query to prevent flag injection
+        const sepIdx = args.indexOf('--');
+        const queryIdx = args.indexOf('hello');
+        assert.ok(sepIdx < queryIdx, '-- separator should come before query');
     });
 
     it('adds --resume when conversation_id is provided', () => {

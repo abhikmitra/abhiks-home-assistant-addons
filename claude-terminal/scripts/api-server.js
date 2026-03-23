@@ -116,6 +116,7 @@ function buildClaudeArgs(params) {
     const { query, conversation_id, context, json_schema } = params;
     const args = [
         '-p',
+        '--',
         query,
         '--dangerously-skip-permissions',
         '--output-format',
@@ -189,10 +190,21 @@ function sendJSON(res, statusCode, body) {
     res.end(payload);
 }
 
+const MAX_BODY_BYTES = 1_048_576; // 1 MB
+
 function readBody(req) {
     return new Promise((resolve, reject) => {
         const chunks = [];
-        req.on('data', (chunk) => chunks.push(chunk));
+        let totalBytes = 0;
+        req.on('data', (chunk) => {
+            totalBytes += chunk.length;
+            if (totalBytes > MAX_BODY_BYTES) {
+                req.destroy();
+                reject(new Error(`Request body exceeds ${MAX_BODY_BYTES} byte limit`));
+                return;
+            }
+            chunks.push(chunk);
+        });
         req.on('end', () => resolve(Buffer.concat(chunks).toString()));
         req.on('error', reject);
     });
