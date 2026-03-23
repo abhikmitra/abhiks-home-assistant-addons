@@ -34,6 +34,8 @@ init_environment() {
     # Claude-specific environment variables
     export ANTHROPIC_CONFIG_DIR="$claude_config_dir"
     export ANTHROPIC_HOME="/data"
+    # Enable experimental agent teams for multi-agent coordination
+    export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
     # Migrate any existing authentication files from legacy locations
     migrate_legacy_auth_files "$claude_config_dir"
@@ -50,6 +52,7 @@ init_environment() {
     bashio::log.info "  - Config: $XDG_CONFIG_HOME"
     bashio::log.info "  - Claude config: $ANTHROPIC_CONFIG_DIR"
     bashio::log.info "  - Cache: $XDG_CACHE_HOME"
+    bashio::log.info "  - Agent teams: enabled"
 }
 
 # One-time migration of existing authentication files
@@ -278,7 +281,7 @@ get_claude_launch_command() {
 
     if [ "$auto_launch_claude" = "true" ]; then
         # Use tmux for session persistence - attach to existing or create new
-        echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+        echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
     else
         # Session picker manages its own tmux sessions internally,
         # so do NOT wrap it in tmux (that would cause nested tmux errors)
@@ -287,7 +290,7 @@ get_claude_launch_command() {
         else
             # Fallback if session picker is missing
             bashio::log.warning "Session picker not found, falling back to auto-launch"
-            echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+            echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
         fi
     fi
 }
