@@ -25,5 +25,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     LOGGER.info("Unloading Claude Terminal integration")
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data.pop(DOMAIN, None)
+        domain_data = hass.data.pop(DOMAIN, {})
+        session = domain_data.get("session")
+        if session:
+            LOGGER.debug("Closing aiohttp session")
+            await session.close()
     return unload_ok
