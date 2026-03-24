@@ -357,6 +357,29 @@ async def handle_query(request: web.Request) -> web.Response:
             status=504,
         )
     except Exception as e:
+        # Stale session retry: if resume failed (e.g. terminal killed the session),
+        # retry the same query without conversation_id (fresh session)
+        if conversation_id and "exit code 1" in str(e):
+            log.warning("[%s] Session resume failed (stale session), retrying without conversation_id: %s", request_id, e)
+            try:
+                result = await asyncio.wait_for(
+                    run_agent_query(query_text, context, None),
+                    timeout=QUERY_TIMEOUT_S,
+                )
+                log.info("[%s] Fresh retry succeeded: session_id=%s, result_length=%d", request_id, result.get("session_id"), len(result.get("result", "")))
+                return web.json_response(result)
+            except asyncio.TimeoutError:
+                log.error("[%s] Fresh retry timed out after %ds", request_id, QUERY_TIMEOUT_S)
+                return web.json_response(
+                    {"error": True, "message": f"Query timed out after {QUERY_TIMEOUT_S} seconds", "code": 504},
+                    status=504,
+                )
+            except Exception as retry_e:
+                log.error("[%s] Fresh retry also failed: %s", request_id, retry_e, exc_info=True)
+                return web.json_response(
+                    {"error": True, "message": str(retry_e), "code": 500},
+                    status=500,
+                )
         log.error("[%s] Query failed: %s", request_id, e, exc_info=True)
         return web.json_response(
             {"error": True, "message": str(e), "code": 500},
