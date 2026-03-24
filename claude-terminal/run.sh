@@ -458,20 +458,21 @@ install_custom_integration() {
 
 # Start the API server for conversation/AI Task integration
 start_api_server() {
-    local api_script="/opt/scripts/api-server.js"
+    local api_script="/opt/scripts/api-server.py"
 
     if [ ! -f "$api_script" ]; then
         bashio::log.warning "API server script not found at $api_script, skipping"
         return 0
     fi
 
-    bashio::log.info "Starting Claude Terminal API server..."
+    bashio::log.info "Starting Claude Terminal API server (Python)..."
     bashio::log.info "  Script: $api_script"
     bashio::log.info "  Port: 8099"
     bashio::log.info "  Rate limit: 10 requests/minute"
+    bashio::log.info "  Endpoints: /api/query, /api/run-script, /api/health"
 
     # Start in background - output goes to container logs
-    node "$api_script" &
+    python3 "$api_script" &
     local api_pid=$!
 
     bashio::log.info "API server started (PID: $api_pid)"
