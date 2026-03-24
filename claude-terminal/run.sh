@@ -37,6 +37,16 @@ init_environment() {
     # Enable experimental agent teams for multi-agent coordination
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
+    # Claude OAuth token for Agent SDK (optional — falls back to stored CLI session)
+    local claude_oauth_token
+    claude_oauth_token=$(bashio::config 'claude_oauth_token' '')
+    if [ -n "$claude_oauth_token" ]; then
+        export CLAUDE_CODE_OAUTH_TOKEN="$claude_oauth_token"
+        bashio::log.info "  - Claude OAuth token: set from add-on config"
+    else
+        bashio::log.info "  - Claude OAuth token: not configured (using stored CLI session)"
+    fi
+
     # Migrate any existing authentication files from legacy locations
     migrate_legacy_auth_files "$claude_config_dir"
 
