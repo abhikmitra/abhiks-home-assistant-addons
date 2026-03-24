@@ -37,6 +37,9 @@ init_environment() {
     # Enable experimental agent teams for multi-agent coordination
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
+    # Skip permission prompts — this is a dedicated HA appliance
+    export CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=true
+
     # Migrate any existing authentication files from legacy locations
     migrate_legacy_auth_files "$claude_config_dir"
 
@@ -281,7 +284,7 @@ get_claude_launch_command() {
 
     if [ "$auto_launch_claude" = "true" ]; then
         # Use tmux for session persistence - attach to existing or create new
-        echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
+        echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
     else
         # Session picker manages its own tmux sessions internally,
         # so do NOT wrap it in tmux (that would cause nested tmux errors)
@@ -290,7 +293,7 @@ get_claude_launch_command() {
         else
             # Fallback if session picker is missing
             bashio::log.warning "Session picker not found, falling back to auto-launch"
-            echo "${welcome_prefix}tmux new-session -A -s claude 'claude --dangerously-skip-permissions'"
+            echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
         fi
     fi
 }
