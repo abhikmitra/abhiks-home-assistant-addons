@@ -284,7 +284,7 @@ get_claude_launch_command() {
 
     if [ "$auto_launch_claude" = "true" ]; then
         # Use tmux for session persistence - attach to existing or create new
-        echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+        echo "${welcome_prefix}tmux new-session -A -s claude 'claude 2>&1 | tee /data/claude-debug.log; echo EXIT_CODE=\$? >> /data/claude-debug.log'"
     else
         # Session picker manages its own tmux sessions internally,
         # so do NOT wrap it in tmux (that would cause nested tmux errors)
@@ -293,7 +293,7 @@ get_claude_launch_command() {
         else
             # Fallback if session picker is missing
             bashio::log.warning "Session picker not found, falling back to auto-launch"
-            echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+            echo "${welcome_prefix}tmux new-session -A -s claude 'claude 2>&1 | tee /data/claude-debug.log; echo EXIT_CODE=\$? >> /data/claude-debug.log'"
         fi
     fi
 }
