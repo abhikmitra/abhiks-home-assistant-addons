@@ -30,6 +30,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 # ha-mcp requires Python 3.13+, uv handles this automatically
 RUN apk add --no-cache uv
 
+# Install Claude Agent SDK for Python API server
+RUN pip3 install --break-system-packages claude-agent-sdk
+
 # Create directory for Claude configuration and set working directory
 RUN mkdir -p /config/claude-config
 WORKDIR /config
