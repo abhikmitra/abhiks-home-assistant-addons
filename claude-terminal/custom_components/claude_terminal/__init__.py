@@ -8,7 +8,15 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, LOGGER
 
-PLATFORMS = [Platform.CONVERSATION]
+PLATFORMS: list[Platform | str] = [Platform.CONVERSATION]
+
+# AI Task platform — only available on HA versions that support it
+try:
+    from homeassistant.components.ai_task import AITaskEntityFeature  # noqa: F401
+    PLATFORMS.append("ai_task")
+    LOGGER.debug("AI Task platform available, registering")
+except ImportError:
+    LOGGER.debug("AI Task platform not available on this HA version, skipping")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
