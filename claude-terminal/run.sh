@@ -277,10 +277,14 @@ get_claude_launch_command() {
     dangerously_skip_permissions=$(bashio::config 'dangerously_skip_permissions' 'false')
 
     # Build claude command with optional --dangerously-skip-permissions
+    # IS_SANDBOX=1 is required for --dangerously-skip-permissions in interactive mode
     claude_cmd="claude"
     if [ "$dangerously_skip_permissions" = "true" ]; then
-        claude_cmd="claude --dangerously-skip-permissions"
+        claude_cmd="IS_SANDBOX=1 claude --dangerously-skip-permissions"
+        export ALLOW_YOLO_MODE=1
         bashio::log.warning "YOLO mode enabled: --dangerously-skip-permissions is active"
+    else
+        export ALLOW_YOLO_MODE=0
     fi
 
     # Prepend welcome banner if available (runs inside ttyd, user-visible)
