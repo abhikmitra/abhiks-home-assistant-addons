@@ -110,6 +110,43 @@ After installing or updating the add-on:
 2. Go to **Settings** → **Devices & Services** → **Add Integration**
 3. Search for **Claude Terminal** and add it
 
+### Authentication
+
+The add-on supports three authentication methods (checked in order):
+
+1. **Add-on config (recommended):** Paste your Claude OAuth token in the add-on's **Configuration** tab under `claude_oauth_token`. Get the token by running `claude setup-token` in the terminal.
+
+2. **Stored CLI session:** If you've logged in through the web terminal (`claude auth login`), the session is saved and reused automatically.
+
+3. **secrets.yaml:** Scripts can read the token from `/config/secrets.yaml`:
+   ```yaml
+   claude_oauth_token: "sk-ant-oat01-..."
+   ```
+
+### Script Execution
+
+Run Python scripts (like the irrigation advisor) from HA automations:
+
+```yaml
+shell_command:
+  run_irrigation: >
+    curl -s -X POST http://<addon-hostname>:8099/api/run-script
+    -H "Content-Type: application/json"
+    -d '{"script": "irrigation_advisor_claude.py"}'
+```
+
+Or run inline code:
+
+```yaml
+shell_command:
+  quick_claude: >
+    curl -s -X POST http://<addon-hostname>:8099/api/run-script
+    -H "Content-Type: application/json"
+    -d '{"code": "print(\"hello from Claude\")"}'
+```
+
+Check the add-on logs for the actual hostname (look for "Add-on hostname for integration:").
+
 ### Use as a Voice Assistant
 
 Go to **Settings** → **Voice Assistants** and select Claude Terminal as your conversation agent. You can then use Claude through any voice satellite or the Assist panel.
