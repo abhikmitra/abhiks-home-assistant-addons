@@ -34,6 +34,8 @@ init_environment() {
     # Claude-specific environment variables
     export ANTHROPIC_CONFIG_DIR="$claude_config_dir"
     export ANTHROPIC_HOME="/data"
+    # Required for --dangerously-skip-permissions (CLI refuses without it when running as root)
+    export IS_SANDBOX=1
     # Enable experimental agent teams for multi-agent coordination
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 

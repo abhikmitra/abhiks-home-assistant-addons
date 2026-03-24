@@ -140,7 +140,7 @@ def build_system_prompt(context: dict | None) -> str:
 
 async def run_agent_query(prompt: str, context: dict | None, conversation_id: str | None) -> dict:
     """Run a query using the Claude Agent SDK."""
-    from claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage, SystemMessage
+    from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, SystemMessage
 
     system_prompt = build_system_prompt(context)
     oauth_token = get_oauth_token()
@@ -170,14 +170,26 @@ async def run_agent_query(prompt: str, context: dict | None, conversation_id: st
 
     try:
         async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, ResultMessage):
-                result_text = msg.result or ""
+            msg_type = type(msg).__name__
+            log.debug("SDK message: type=%s", msg_type)
+
+            if isinstance(msg, AssistantMessage):
+                # Primary path: SDK emits text via AssistantMessage.content[].text
+                for block in msg.content:
+                    if hasattr(block, 'text'):
+                        result_text += block.text
+                log.info("Got AssistantMessage: accumulated_length=%d", len(result_text))
+            elif isinstance(msg, ResultMessage):
+                # Fallback: use ResultMessage if it arrives (may not due to rate_limit_event)
+                if msg.result:
+                    result_text = msg.result
                 log.info("Got ResultMessage: length=%d, stop_reason=%s", len(result_text), getattr(msg, 'stop_reason', 'unknown'))
             elif isinstance(msg, SystemMessage) and getattr(msg, 'subtype', '') == "init":
                 session_id = getattr(msg, 'data', {}).get("session_id")
                 log.info("Got session_id: %s", session_id)
     except Exception as e:
-        # SDK may throw on rate_limit_event — if we have result text, that's OK
+        # SDK may throw on unknown message types (e.g. rate_limit_event)
+        # If we already have text, that's fine — the AI response came through
         if not result_text:
             raise
         log.warning("Agent SDK non-fatal error (result already collected): %s", e)
