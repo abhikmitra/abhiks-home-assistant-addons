@@ -54,22 +54,22 @@ fi
 
 # Test 4: API server syntax check
 echo "Test 4: API server syntax"
-API_FILE="$BASE_DIR/scripts/api-server.js"
+API_FILE="$BASE_DIR/scripts/api-server.py"
 if [ -f "$API_FILE" ]; then
-    if node --check "$API_FILE" 2>/dev/null; then
-        pass "api-server.js has valid syntax"
+    if python3 -c "import ast; ast.parse(open('$API_FILE').read())" 2>/dev/null; then
+        pass "api-server.py has valid syntax"
     else
-        fail "api-server.js has syntax errors"
+        fail "api-server.py has syntax errors"
     fi
 else
-    skip "api-server.js not found"
+    skip "api-server.py not found"
 fi
 
 # Test 5: API server unit tests
 echo "Test 5: API server unit tests"
-TEST_FILE="$BASE_DIR/tests/test-api-server.js"
+TEST_FILE="$BASE_DIR/tests/test-api-server.py"
 if [ -f "$TEST_FILE" ]; then
-    if (cd "$BASE_DIR" && node --test tests/test-api-server.js) 2>/dev/null; then
+    if (cd "$BASE_DIR" && python3 -m pytest tests/test-api-server.py -q) 2>/dev/null; then
         pass "API server tests pass"
     else
         fail "API server tests failed"
