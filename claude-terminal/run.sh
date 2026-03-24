@@ -37,9 +37,6 @@ init_environment() {
     # Enable experimental agent teams for multi-agent coordination
     export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 
-    # Skip permission prompts — this is a dedicated HA appliance
-    export CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=true
-
     # Migrate any existing authentication files from legacy locations
     migrate_legacy_auth_files "$claude_config_dir"
 
@@ -272,9 +269,19 @@ generate_ha_context() {
 # Determine Claude launch command based on configuration
 get_claude_launch_command() {
     local auto_launch_claude
+    local dangerously_skip_permissions
+    local claude_cmd
 
-    # Get configuration value, default to true for backward compatibility
+    # Get configuration values
     auto_launch_claude=$(bashio::config 'auto_launch_claude' 'true')
+    dangerously_skip_permissions=$(bashio::config 'dangerously_skip_permissions' 'false')
+
+    # Build claude command with optional --dangerously-skip-permissions
+    claude_cmd="claude"
+    if [ "$dangerously_skip_permissions" = "true" ]; then
+        claude_cmd="claude --dangerously-skip-permissions"
+        bashio::log.warning "YOLO mode enabled: --dangerously-skip-permissions is active"
+    fi
 
     # Prepend welcome banner if available (runs inside ttyd, user-visible)
     local welcome_prefix=""
@@ -284,7 +291,7 @@ get_claude_launch_command() {
 
     if [ "$auto_launch_claude" = "true" ]; then
         # Use tmux for session persistence - attach to existing or create new
-        echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+        echo "${welcome_prefix}tmux new-session -A -s claude '${claude_cmd}'"
     else
         # Session picker manages its own tmux sessions internally,
         # so do NOT wrap it in tmux (that would cause nested tmux errors)
@@ -293,7 +300,7 @@ get_claude_launch_command() {
         else
             # Fallback if session picker is missing
             bashio::log.warning "Session picker not found, falling back to auto-launch"
-            echo "${welcome_prefix}tmux new-session -A -s claude 'claude'"
+            echo "${welcome_prefix}tmux new-session -A -s claude '${claude_cmd}'"
         fi
     fi
 }
@@ -401,6 +408,16 @@ install_custom_integration() {
     if cp -r "$source_dir" "/config/custom_components/"; then
         # Write version marker
         echo "$addon_version" > "$version_marker"
+
+        # Write the add-on slug so the integration can discover our hostname
+        local addon_slug
+        addon_slug=$(bashio::addon.slug 2>/dev/null || echo "")
+        if [ -n "$addon_slug" ]; then
+            local addon_hostname
+            addon_hostname=$(echo "$addon_slug" | tr '_' '-')
+            echo "$addon_hostname" > "$target_dir/.addon_hostname"
+            bashio::log.info "  Add-on hostname for integration: $addon_hostname"
+        fi
         bashio::log.info "Custom integration installed/updated to v$addon_version"
         bashio::log.info "  Installed to: $target_dir"
 

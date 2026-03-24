@@ -17,7 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .api import ClaudeTerminalAPI, ClaudeTerminalAPIError
-from .const import DOMAIN, LOGGER
+from .const import DOMAIN, LOGGER, get_addon_hostname
 
 
 async def async_setup_entry(
@@ -27,8 +27,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up the conversation entity."""
     LOGGER.info("Setting up Claude Terminal conversation entity")
+    hostname = get_addon_hostname()
+    LOGGER.info("Using add-on hostname: %s", hostname)
     session = async_get_clientsession(hass)
-    api = ClaudeTerminalAPI(session)
+    api = ClaudeTerminalAPI(session, hostname=hostname)
     hass.data[DOMAIN]["api"] = api
     async_add_entities([ClaudeTerminalConversationEntity(config_entry, api)])
     LOGGER.info("Claude Terminal conversation entity registered")
