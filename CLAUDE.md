@@ -61,11 +61,16 @@ The add-on implements a sophisticated credential management system:
 - **Security**: Proper file permissions (600) and safe directory operations
 
 ### Container Execution Flow
-1. Initialize environment and create credential directories
-2. Install ttyd and tools via apk
-3. Setup modular credential management scripts
-4. Start background credential monitoring service
-5. Launch ttyd web terminal with Claude auto-start
+1. Run health check diagnostics
+2. Initialize environment (XDG dirs, env vars, agent teams, legacy auth migration)
+3. Install tools (ttyd, jq, curl, tmux)
+4. Setup session picker and helper scripts
+5. Install persistent packages (apk/pip from config)
+6. Generate Home Assistant context (CLAUDE.md with entity counts, add-ons, errors)
+7. Setup ha-mcp (Home Assistant MCP server for Claude)
+8. Install custom integration to `/config/custom_components/claude_terminal/`
+9. Start API server on port 8099 (background, for conversation/AI Task)
+10. Launch ttyd web terminal with Claude auto-start
 
 ## Development Notes
 
@@ -134,12 +139,28 @@ podman exec test-claude-dev chmod +x /opt/scripts/claude-session-picker.sh
 - **Permissions**: Credential files must have 600 permissions
 
 ### Key Environment Variables
-- `CLAUDE_CREDENTIALS_DIRECTORY=/config/claude-config`
-- `ANTHROPIC_CONFIG_DIR=/config/claude-config`
-- `HOME=/root`
+- `ANTHROPIC_CONFIG_DIR=/data/.config/claude`
+- `HOME=/data/home`
+- `XDG_CONFIG_HOME=/data/.config`
+- `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+- `ALLOW_YOLO_MODE=1` (when dangerously_skip_permissions is enabled)
+- `IS_SANDBOX=1` — **required** prefix when launching `claude --dangerously-skip-permissions` in interactive terminal mode. Without this, Claude detects stdin mode and exits immediately.
+
+### Claude Code CLI Flags
+- `--dangerously-skip-permissions` — must be launched with `IS_SANDBOX=1` prefix in interactive mode: `IS_SANDBOX=1 claude --dangerously-skip-permissions`
+- In `-p` (print/headless) mode, the flag works without `IS_SANDBOX=1`
+- Piping claude output (e.g., `claude | tee log`) breaks interactive mode — Claude detects stdin and exits
+
+### Add-on Hostname Discovery
+- Local add-ons get a hash-prefixed slug (e.g., `a0d7b954_claude_terminal`)
+- The Supervisor hostname = slug with underscores replaced by hyphens (e.g., `a0d7b954-claude-terminal`)
+- `run.sh` writes the hostname to `/config/custom_components/claude_terminal/.addon_hostname`
+- The Python integration reads this file to discover the correct API server address
+- **Never hardcode `claude-terminal` as the hostname** — it won't work for local add-ons
 
 ### Important Constraints
 - No sudo privileges available in development environment
 - Add-on targets Home Assistant OS (Alpine Linux base)
 - Must handle credential persistence across container restarts
 - Requires multi-architecture compatibility
+- On Apple Silicon Macs, use `ghcr.io/home-assistant/aarch64-base:3.21` for podman builds (not amd64)
