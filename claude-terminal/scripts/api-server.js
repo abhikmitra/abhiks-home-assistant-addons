@@ -116,13 +116,12 @@ function buildSystemPrompt(context) {
  */
 function buildClaudeArgs(params) {
     const { query, conversation_id, context, json_schema } = params;
+    // All flags MUST come before '--'. Everything after '--' is positional
+    // (treated as the prompt text). Placing flags after '--' silently breaks them.
     const args = [
         '-p',
-        '--',
-        query,
         '--dangerously-skip-permissions',
-        '--output-format',
-        'json',
+        '--output-format', 'json',
     ];
 
     if (conversation_id) {
@@ -140,6 +139,9 @@ function buildClaudeArgs(params) {
 
     const systemPrompt = buildSystemPrompt(context);
     args.push('--append-system-prompt', systemPrompt);
+
+    // '--' terminates flag parsing — query comes last as positional arg
+    args.push('--', query);
 
     return args;
 }
