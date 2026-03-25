@@ -11,9 +11,11 @@ from homeassistant.components.conversation import (
     ConversationInput,
     ConversationResult,
 )
+from homeassistant.components.homeassistant.exposed_entities import async_should_expose
+from homeassistant.components import conversation as ha_conversation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr, intent
+from homeassistant.helpers import device_registry as dr, entity_registry as er, intent
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -89,6 +91,28 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
         response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, message)
         return ConversationResult(response=response, conversation_id=conversation_id)
 
+    def _get_exposed_entities(self) -> list[dict]:
+        """Return entities exposed to the conversation assistant."""
+        interesting_attrs = (
+            "friendly_name", "brightness", "color_temp", "hvac_mode",
+            "current_temperature", "temperature", "media_title",
+        )
+        entities = []
+        for state in self.hass.states.async_all():
+            if not async_should_expose(self.hass, ha_conversation.DOMAIN, state.entity_id):
+                continue
+            attrs = state.attributes
+            entity = {
+                "entity_id": state.entity_id,
+                "name": attrs.get("friendly_name", state.entity_id),
+                "state": state.state,
+                "attributes": {
+                    k: attrs[k] for k in interesting_attrs if k in attrs
+                },
+            }
+            entities.append(entity)
+        return entities
+
     async def _async_handle_message(
         self,
         user_input: ConversationInput,
@@ -125,6 +149,7 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
             "satellite_name": satellite_name,
             "language": user_input.language,
             "extra_system_prompt": getattr(user_input, 'extra_system_prompt', None),
+            "exposed_entities": self._get_exposed_entities(),
         }
 
         LOGGER.debug("Built context for API call: %s", context)

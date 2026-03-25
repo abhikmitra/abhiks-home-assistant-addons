@@ -131,6 +131,19 @@ def build_system_prompt(context: dict | None) -> str:
         parts.append("")
         parts.append(context["extra_system_prompt"])
 
+    entities = context.get("exposed_entities", [])
+    if entities:
+        parts.append("")
+        parts.append("## Exposed Home Assistant Entities")
+        parts.append("These are the devices you can control (entity_id | name | current state):")
+        for e in entities:
+            parts.append(f"  - {e['entity_id']} | {e['name']} | {e['state']}")
+        parts.append("")
+        parts.append("## Tools Available")
+        parts.append("You have access to the Home Assistant MCP server.")
+        parts.append("Use it to read entity states and call services to control devices.")
+        parts.append("When asked to control a device, call the appropriate service, then confirm what you did in one sentence.")
+
     return "\n".join(parts)
 
 
@@ -147,7 +160,7 @@ async def run_agent_query(prompt: str, context: dict | None, conversation_id: st
 
     options_kwargs = {
         "cli_path": "/usr/local/bin/claude",
-        "max_turns": 3,
+        "max_turns": 10,
         "permission_mode": "bypassPermissions",
         "model": "haiku",
         "system_prompt": system_prompt,
@@ -155,7 +168,7 @@ async def run_agent_query(prompt: str, context: dict | None, conversation_id: st
 
     # Pass OAuth token if explicitly available; otherwise let CLI use stored session
     if oauth_token:
-        options_kwargs["env"] = {"CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
+        options_kwargs["env"] = {**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": oauth_token}
 
     if conversation_id:
         options_kwargs["resume"] = conversation_id
