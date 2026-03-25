@@ -26,7 +26,7 @@ async def async_setup_entry(
     LOGGER.info("Setting up Claude Terminal AI Task entity")
     # Reuse the API client if conversation entity already created it
     if "api" not in hass.data.get(DOMAIN, {}):
-        hostname = get_addon_hostname()
+        hostname = await hass.async_add_executor_job(get_addon_hostname)
         session = async_get_clientsession(hass)
         api = ClaudeTerminalAPI(session, hostname=hostname)
         hass.data.setdefault(DOMAIN, {})["api"] = api

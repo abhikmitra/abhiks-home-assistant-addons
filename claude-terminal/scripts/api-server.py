@@ -46,7 +46,7 @@ log = logging.getLogger("api-server")
 # State
 # ---------------------------------------------------------------------------
 
-busy = False
+_query_lock = asyncio.Lock()
 request_timestamps: list[float] = []
 
 
@@ -282,12 +282,11 @@ async def run_script(script: str | None, code: str | None, args: list[str]) -> d
 async def handle_health(request: web.Request) -> web.Response:
     """GET /api/health"""
     log.debug("Health check")
-    return web.json_response({"status": "ok", "busy": busy})
+    return web.json_response({"status": "ok", "busy": _query_lock.locked()})
 
 
 async def handle_query(request: web.Request) -> web.Response:
     """POST /api/query — run a Claude Agent SDK query."""
-    global busy
     request_id = uuid.uuid4().hex[:8]
 
     log.info("[%s] Query request received", request_id)
@@ -297,13 +296,6 @@ async def handle_query(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": True, "message": "Rate limit exceeded. Max 10 requests per minute.", "code": 429},
             status=429,
-        )
-
-    if busy:
-        log.warning("[%s] Busy", request_id)
-        return web.json_response(
-            {"error": True, "message": "Another request is currently being processed.", "code": 503},
-            status=503,
         )
 
     # Read body with size limit
@@ -340,58 +332,55 @@ async def handle_query(request: web.Request) -> web.Response:
         bool(conversation_id),
     )
 
-    busy = True
     request_timestamps.append(time.time())
 
-    try:
-        result = await asyncio.wait_for(
-            run_agent_query(query_text, context, conversation_id),
-            timeout=QUERY_TIMEOUT_S,
-        )
-        log.info("[%s] Query complete: session_id=%s, result_length=%d", request_id, result.get("session_id"), len(result.get("result", "")))
-        return web.json_response(result)
-    except asyncio.TimeoutError:
-        log.error("[%s] Query timed out after %ds", request_id, QUERY_TIMEOUT_S)
-        return web.json_response(
-            {"error": True, "message": f"Query timed out after {QUERY_TIMEOUT_S} seconds", "code": 504},
-            status=504,
-        )
-    except Exception as e:
-        # Stale session retry: if resume failed (e.g. terminal killed the session),
-        # retry the same query without conversation_id (fresh session)
-        if conversation_id and "exit code 1" in str(e):
-            log.warning("[%s] Session resume failed (stale session), retrying without conversation_id: %s", request_id, e)
-            try:
-                result = await asyncio.wait_for(
-                    run_agent_query(query_text, context, None),
-                    timeout=QUERY_TIMEOUT_S,
-                )
-                log.info("[%s] Fresh retry succeeded: session_id=%s, result_length=%d", request_id, result.get("session_id"), len(result.get("result", "")))
-                return web.json_response(result)
-            except asyncio.TimeoutError:
-                log.error("[%s] Fresh retry timed out after %ds", request_id, QUERY_TIMEOUT_S)
-                return web.json_response(
-                    {"error": True, "message": f"Query timed out after {QUERY_TIMEOUT_S} seconds", "code": 504},
-                    status=504,
-                )
-            except Exception as retry_e:
-                log.error("[%s] Fresh retry also failed: %s", request_id, retry_e, exc_info=True)
-                return web.json_response(
-                    {"error": True, "message": str(retry_e), "code": 500},
-                    status=500,
-                )
-        log.error("[%s] Query failed: %s", request_id, e, exc_info=True)
-        return web.json_response(
-            {"error": True, "message": str(e), "code": 500},
-            status=500,
-        )
-    finally:
-        busy = False
+    async with _query_lock:
+        try:
+            result = await asyncio.wait_for(
+                run_agent_query(query_text, context, conversation_id),
+                timeout=QUERY_TIMEOUT_S,
+            )
+            log.info("[%s] Query complete: session_id=%s, result_length=%d", request_id, result.get("session_id"), len(result.get("result", "")))
+            return web.json_response(result)
+        except asyncio.TimeoutError:
+            log.error("[%s] Query timed out after %ds", request_id, QUERY_TIMEOUT_S)
+            return web.json_response(
+                {"error": True, "message": f"Query timed out after {QUERY_TIMEOUT_S} seconds", "code": 504},
+                status=504,
+            )
+        except Exception as e:
+            # Stale session retry: if resume failed (e.g. terminal killed the session),
+            # retry the same query without conversation_id (fresh session)
+            if conversation_id and "exit code 1" in str(e):
+                log.warning("[%s] Session resume failed (stale session), retrying without conversation_id: %s", request_id, e)
+                try:
+                    result = await asyncio.wait_for(
+                        run_agent_query(query_text, context, None),
+                        timeout=QUERY_TIMEOUT_S,
+                    )
+                    log.info("[%s] Fresh retry succeeded: session_id=%s, result_length=%d", request_id, result.get("session_id"), len(result.get("result", "")))
+                    return web.json_response(result)
+                except asyncio.TimeoutError:
+                    log.error("[%s] Fresh retry timed out after %ds", request_id, QUERY_TIMEOUT_S)
+                    return web.json_response(
+                        {"error": True, "message": f"Query timed out after {QUERY_TIMEOUT_S} seconds", "code": 504},
+                        status=504,
+                    )
+                except Exception as retry_e:
+                    log.error("[%s] Fresh retry also failed: %s", request_id, retry_e, exc_info=True)
+                    return web.json_response(
+                        {"error": True, "message": str(retry_e), "code": 500},
+                        status=500,
+                    )
+            log.error("[%s] Query failed: %s", request_id, e, exc_info=True)
+            return web.json_response(
+                {"error": True, "message": str(e), "code": 500},
+                status=500,
+            )
 
 
 async def handle_run_script(request: web.Request) -> web.Response:
     """POST /api/run-script — execute a Python script or inline code."""
-    global busy
     request_id = uuid.uuid4().hex[:8]
 
     log.info("[%s] Run-script request received", request_id)
@@ -401,13 +390,6 @@ async def handle_run_script(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": True, "message": "Rate limit exceeded.", "code": 429},
             status=429,
-        )
-
-    if busy:
-        log.warning("[%s] Busy", request_id)
-        return web.json_response(
-            {"error": True, "message": "Another request is currently being processed.", "code": 503},
-            status=503,
         )
 
     body_bytes = await request.content.read(MAX_BODY_BYTES + 1)
@@ -443,39 +425,37 @@ async def handle_run_script(request: web.Request) -> web.Response:
 
     log.info("[%s] Running: %s", request_id, script or "[inline code]")
 
-    busy = True
     request_timestamps.append(time.time())
 
-    try:
-        result = await run_script(script, code, args)
-        log.info("[%s] Script complete: exit_code=%d, duration=%dms", request_id, result["exit_code"], result["duration_ms"])
-        return web.json_response(result)
-    except FileNotFoundError as e:
-        log.error("[%s] Script not found: %s", request_id, e)
-        return web.json_response(
-            {"error": True, "message": str(e), "code": 404},
-            status=404,
-        )
-    except ValueError as e:
-        log.error("[%s] Invalid script: %s", request_id, e)
-        return web.json_response(
-            {"error": True, "message": str(e), "code": 400},
-            status=400,
-        )
-    except asyncio.TimeoutError:
-        log.error("[%s] Script timed out after %ds", request_id, SCRIPT_TIMEOUT_S)
-        return web.json_response(
-            {"error": True, "message": f"Script timed out after {SCRIPT_TIMEOUT_S} seconds", "code": 504},
-            status=504,
-        )
-    except Exception as e:
-        log.error("[%s] Script failed: %s", request_id, e, exc_info=True)
-        return web.json_response(
-            {"error": True, "message": str(e), "code": 500},
-            status=500,
-        )
-    finally:
-        busy = False
+    async with _query_lock:
+        try:
+            result = await run_script(script, code, args)
+            log.info("[%s] Script complete: exit_code=%d, duration=%dms", request_id, result["exit_code"], result["duration_ms"])
+            return web.json_response(result)
+        except FileNotFoundError as e:
+            log.error("[%s] Script not found: %s", request_id, e)
+            return web.json_response(
+                {"error": True, "message": str(e), "code": 404},
+                status=404,
+            )
+        except ValueError as e:
+            log.error("[%s] Invalid script: %s", request_id, e)
+            return web.json_response(
+                {"error": True, "message": str(e), "code": 400},
+                status=400,
+            )
+        except asyncio.TimeoutError:
+            log.error("[%s] Script timed out after %ds", request_id, SCRIPT_TIMEOUT_S)
+            return web.json_response(
+                {"error": True, "message": f"Script timed out after {SCRIPT_TIMEOUT_S} seconds", "code": 504},
+                status=504,
+            )
+        except Exception as e:
+            log.error("[%s] Script failed: %s", request_id, e, exc_info=True)
+            return web.json_response(
+                {"error": True, "message": str(e), "code": 500},
+                status=500,
+            )
 
 
 # ---------------------------------------------------------------------------

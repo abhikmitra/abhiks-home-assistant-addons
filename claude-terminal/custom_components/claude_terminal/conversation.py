@@ -7,6 +7,7 @@ from typing import Literal
 from homeassistant.components.conversation import (
     ChatLog,
     ConversationEntity,
+    ConversationEntityFeature,
     ConversationInput,
     ConversationResult,
 )
@@ -27,7 +28,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up the conversation entity."""
     LOGGER.info("Setting up Claude Terminal conversation entity")
-    hostname = get_addon_hostname()
+    hostname = await hass.async_add_executor_job(get_addon_hostname)
     LOGGER.info("Using add-on hostname: %s", hostname)
     session = async_get_clientsession(hass)
     api = ClaudeTerminalAPI(session, hostname=hostname)
@@ -41,6 +42,7 @@ class ClaudeTerminalConversationEntity(ConversationEntity):
 
     _attr_has_entity_name = True
     _attr_name = "Claude Terminal"
+    _attr_supported_features = ConversationEntityFeature.CONTROL
 
     def __init__(self, config_entry: ConfigEntry, api: ClaudeTerminalAPI) -> None:
         """Initialize the entity."""
