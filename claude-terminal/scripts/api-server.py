@@ -182,7 +182,19 @@ async def run_agent_query(prompt: str, context: dict | None, conversation_id: st
     log.info("Starting Agent SDK query: prompt_length=%d, has_conversation_id=%s", len(prompt), bool(conversation_id))
 
     try:
-        async for msg in query(prompt=prompt, options=options):
+        sdk_iter = query(prompt=prompt, options=options).__aiter__()
+        while True:
+            try:
+                msg = await sdk_iter.__anext__()
+            except StopAsyncIteration:
+                break
+            except Exception as e:
+                # Skip unknown message types (e.g. rate_limit_event) mid-stream
+                if "Unknown message type" in str(e):
+                    log.warning("Agent SDK skipping unknown message type: %s", e)
+                    continue  # Generator may be dead after this; loop exits on next StopAsyncIteration
+                raise
+
             msg_type = type(msg).__name__
             log.debug("SDK message: type=%s", msg_type)
 
@@ -202,10 +214,13 @@ async def run_agent_query(prompt: str, context: dict | None, conversation_id: st
                 log.info("Got session_id: %s", session_id)
     except Exception as e:
         # SDK may throw on unknown message types (e.g. rate_limit_event)
-        # If we already have text, that's fine — the AI response came through
-        if not result_text:
+        if "Unknown message type" in str(e):
+            # Non-fatal regardless of whether we have a result yet
+            log.warning("Agent SDK unknown message type (non-fatal): %s", e)
+        elif not result_text:
             raise
-        log.warning("Agent SDK non-fatal error (result already collected): %s", e)
+        else:
+            log.warning("Agent SDK non-fatal error (result already collected): %s", e)
 
     duration_ms = int((time.time() - start_time) * 1000)
     log.info("Agent SDK query complete: duration=%dms, result_length=%d, session_id=%s", duration_ms, len(result_text), session_id)
