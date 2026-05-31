@@ -34,10 +34,10 @@ class TestBuildSystemPrompt:
             "device_name": "Kitchen Speaker",
             "language": "en",
         })
-        assert "conversation interface" in prompt
+        assert "Home Assistant Assist" in prompt
         assert "User: Abhik" in prompt
         assert "Kitchen Speaker" in prompt
-        assert "concise and action-oriented" in prompt
+        assert "voice/conversation" in prompt
 
     def test_ai_task_prompt(self):
         prompt = self.mod.build_system_prompt({
@@ -45,7 +45,7 @@ class TestBuildSystemPrompt:
             "task_name": "morning_briefing",
             "language": "en",
         })
-        assert "AI Task interface" in prompt
+        assert "Home Assistant AI Task" in prompt
         assert "Task: morning_briefing" in prompt
         assert "consumed by automations" in prompt
 
@@ -59,7 +59,7 @@ class TestBuildSystemPrompt:
     def test_empty_context(self):
         prompt = self.mod.build_system_prompt({})
         assert isinstance(prompt, str)
-        assert "conversation interface" in prompt
+        assert "Home Assistant Assist" in prompt
 
     def test_none_context(self):
         prompt = self.mod.build_system_prompt(None)
@@ -92,6 +92,46 @@ class TestRateLimiting:
         for _ in range(self.mod.RATE_LIMIT_MAX):
             self.mod.request_timestamps.append(now)
         assert self.mod.is_rate_limited() is True
+
+
+class TestBodyReading:
+    """Test request body reading for multi-chunk HA/aiohttp uploads."""
+
+    def setup_method(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "api_server",
+            Path(__file__).parent.parent / "scripts" / "api-server.py",
+        )
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    @pytest.mark.asyncio
+    async def test_reads_all_chunks(self):
+        class FakeContent:
+            async def iter_chunked(self, _size):
+                yield b'{"query": "'
+                yield b'hello'
+                yield b'"}'
+
+        class FakeRequest:
+            content = FakeContent()
+
+        assert await self.mod.read_limited_body(FakeRequest()) == b'{"query": "hello"}'
+
+    @pytest.mark.asyncio
+    async def test_rejects_oversized_body(self):
+        max_bytes = self.mod.MAX_BODY_BYTES
+
+        class FakeContent:
+            async def iter_chunked(self, _size):
+                yield b"x" * (max_bytes + 1)
+
+        class FakeRequest:
+            content = FakeContent()
+
+        with pytest.raises(self.mod.RequestBodyTooLarge):
+            await self.mod.read_limited_body(FakeRequest())
 
 
 class TestGetOAuthToken:

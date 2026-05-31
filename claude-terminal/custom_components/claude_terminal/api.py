@@ -11,6 +11,8 @@ from .const import (
     API_HEALTH_PATH,
     API_QUERY_PATH,
     API_TIMEOUT_SECONDS,
+    CODEX_BRIDGE_QUERY_PATH,
+    CODEX_BRIDGE_URL,
     DEFAULT_ADDON_HOSTNAME,
     DEFAULT_ADDON_PORT,
     LOGGER,
@@ -66,6 +68,9 @@ class ClaudeTerminalAPI:
         json_schema: dict | None = None,
     ) -> dict[str, Any]:
         """Send a query to the Claude Terminal API server."""
+        if context and context.get("source") == "conversation":
+            return await self._async_codex_query(query, context, conversation_id)
+
         url = f"{self._base_url}{API_QUERY_PATH}"
         payload: dict[str, Any] = {"query": query}
         if context:
@@ -124,4 +129,81 @@ class ClaudeTerminalAPI:
             )
             raise ClaudeTerminalAPIError(
                 f"Request timed out after {API_TIMEOUT_SECONDS} seconds"
+            ) from None
+
+    async def _async_codex_query(
+        self,
+        query: str,
+        context: dict[str, Any],
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a Home Assistant conversation query to the Codex bridge."""
+        url = f"{CODEX_BRIDGE_URL}{CODEX_BRIDGE_QUERY_PATH}"
+        payload: dict[str, Any] = {
+            "task": "ask_jarvis",
+            "mode": "read_only",
+            "question": query,
+        }
+        for key in ("user_name", "device_name", "satellite_name", "language"):
+            if context.get(key):
+                payload[key] = context[key]
+
+        LOGGER.info(
+            "Sending conversation query to Codex bridge: query_length=%d, has_conversation_id=%s",
+            len(query),
+            bool(conversation_id),
+        )
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
+            async with self._session.post(url, json=payload, timeout=timeout) as resp:
+                try:
+                    data = await resp.json()
+                except (aiohttp.ContentTypeError, ValueError) as parse_err:
+                    LOGGER.error(
+                        "Codex bridge returned non-JSON response: status=%s, error=%s",
+                        resp.status, parse_err,
+                    )
+                    raise ClaudeTerminalAPIError(
+                        f"Codex bridge returned non-JSON response (HTTP {resp.status})",
+                        resp.status,
+                    ) from parse_err
+
+                if resp.status != 200 or not data.get("ok"):
+                    error_msg = data.get("error", f"HTTP {resp.status}")
+                    LOGGER.error(
+                        "Codex bridge error: status=%s, message=%s",
+                        resp.status,
+                        error_msg,
+                    )
+                    raise ClaudeTerminalAPIError(error_msg, resp.status)
+
+                result = data.get("data") or {}
+                summary = str(result.get("summary") or "").strip()
+                findings = [
+                    str(item).strip()
+                    for item in result.get("findings", [])
+                    if str(item).strip()
+                ]
+                response_text = summary or "Codex completed the request."
+                if findings:
+                    response_text = f"{response_text} {' '.join(findings[:2])}"
+
+                return {
+                    "result": response_text,
+                    "session_id": conversation_id,
+                    "duration_ms": data.get("duration_ms"),
+                }
+
+        except aiohttp.ClientError as err:
+            LOGGER.error("Failed to connect to Codex bridge: %s", err)
+            raise ClaudeTerminalAPIError(
+                f"Cannot connect to Codex bridge: {err}"
+            ) from err
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                "Codex bridge request timed out after %ds", API_TIMEOUT_SECONDS
+            )
+            raise ClaudeTerminalAPIError(
+                f"Codex bridge timed out after {API_TIMEOUT_SECONDS} seconds"
             ) from None

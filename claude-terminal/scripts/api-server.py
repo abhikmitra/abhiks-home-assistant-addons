@@ -50,6 +50,22 @@ _query_lock = asyncio.Lock()
 request_timestamps: list[float] = []
 
 
+class RequestBodyTooLarge(Exception):
+    """Request body exceeded the API size limit."""
+
+
+async def read_limited_body(request: web.Request) -> bytes:
+    """Read a request body without truncating chunked uploads."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.content.iter_chunked(65536):
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            raise RequestBodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 # ---------------------------------------------------------------------------
 # Rate Limiting
 # ---------------------------------------------------------------------------
@@ -420,9 +436,9 @@ async def handle_query(request: web.Request) -> web.Response:
             status=429,
         )
 
-    # Read body with size limit
-    body_bytes = await request.content.read(MAX_BODY_BYTES + 1)
-    if len(body_bytes) > MAX_BODY_BYTES:
+    try:
+        body_bytes = await read_limited_body(request)
+    except RequestBodyTooLarge:
         return web.json_response(
             {"error": True, "message": f"Request body exceeds {MAX_BODY_BYTES} byte limit", "code": 413},
             status=413,
@@ -514,8 +530,9 @@ async def handle_run_script(request: web.Request) -> web.Response:
             status=429,
         )
 
-    body_bytes = await request.content.read(MAX_BODY_BYTES + 1)
-    if len(body_bytes) > MAX_BODY_BYTES:
+    try:
+        body_bytes = await read_limited_body(request)
+    except RequestBodyTooLarge:
         return web.json_response(
             {"error": True, "message": f"Request body exceeds {MAX_BODY_BYTES} byte limit", "code": 413},
             status=413,

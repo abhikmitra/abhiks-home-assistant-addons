@@ -12,6 +12,8 @@ DEFAULT_ADDON_PORT = 8099
 API_QUERY_PATH = "/api/query"
 API_HEALTH_PATH = "/api/health"
 API_TIMEOUT_SECONDS = 130  # Slightly longer than the server's 120s timeout
+CODEX_BRIDGE_URL = "http://192.168.4.40:8766"
+CODEX_BRIDGE_QUERY_PATH = "/api/run-task"
 
 # The add-on writes its actual hostname here during startup
 ADDON_HOSTNAME_FILE = Path("/config/custom_components/claude_terminal/.addon_hostname")
