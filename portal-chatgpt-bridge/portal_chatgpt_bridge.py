@@ -883,6 +883,11 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # 2026-08-03: ChatGPT shipped a new web UI (Chat/Work homepage) that has NO
+    # "Start voice" button anywhere — voice mode is now entered by navigating
+    # to chatgpt.com/voice, and a live call is signalled by the "Voice mode
+    # selector" control instead of "End voice". Both UIs must keep working
+    # (the rollout may flip back), so every check below accepts either signal.
     ready = False
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -890,14 +895,16 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
             session,
             "(function(){var k=window.__portalKiosk;"
             "if(document.readyState!=='complete') return 'loading';"
-            "if(k.byLabel(/end voice/i)) return 'live';"
+            "if(k.byLabel(/end voice/i)||k.byLabel(/voice mode selector/i)) return 'live';"
             "if(k.byLabel(/start voice/i)) return 'ready';"
+            "if(k.byLabel(/start dictation/i)) return 'ready-new-ui';"
             "return 'hydrating';})()", gesture=False)
-        if state in ("ready", "live"):
+        if state in ("ready", "ready-new-ui", "live"):
             ready = True
             break
         time.sleep(0.25)
-    add_step("page_ready", ready, "Start Voice control present" if ready else "page never hydrated")
+    add_step("page_ready", ready,
+             f"voice entry present ({state})" if ready else "page never hydrated")
 
     # 1. Voice mode. Establishing the WebRTC call is the single slowest step,
     #    so it is kicked off before anything cosmetic and left to negotiate
@@ -908,10 +915,16 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
         session,
         "(function(){var k=window.__portalKiosk;"
         "k.overlay('Starting voice','Opening the live conversation');"
-        "if(k.byLabel(/end voice/i)) return 'already-live';"
+        "if(k.byLabel(/end voice/i)||k.byLabel(/voice mode selector/i)) return 'already-live';"
         "var s=k.byLabel(/start voice/i);"
-        "if(!s) return 'no-start-voice'; s.click(); return 'clicked';})()")
-    add_step("voice_start", clicked in ("clicked", "already-live"), str(clicked))
+        "if(s){s.click(); return 'clicked';}"
+        # New UI: no button exists; the /voice URL is the entry point.
+        "location.assign('https://chatgpt.com/voice'); return 'nav-voice-url';})()")
+    add_step("voice_start", clicked in ("clicked", "already-live", "nav-voice-url"), str(clicked))
+    if clicked == "nav-voice-url":
+        # The navigation reloads the SPA; give it a beat before polling, and
+        # the poll loop below tolerates evaluate errors while it settles.
+        time.sleep(4.0)
 
     # 2. Unmute AND wait for the call, in one loop.
     #
@@ -927,12 +940,18 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
     deadline = start + 30
     last_tap = 0.0
     while time.time() < deadline:
-        state = kiosk_call(
-            session,
-            "(function(){var k=window.__portalKiosk;"
-            "if(k.byLabel(/end voice/i)) return 'live';"
-            "if(k.byLabel(/turn on microphone/i)) return 'muted';"
-            "return 'waiting';})()", gesture=False)
+        try:
+            state = kiosk_call(
+                session,
+                "(function(){var k=window.__portalKiosk;"
+                "if(k.byLabel(/end voice/i)||k.byLabel(/voice mode selector/i)) return 'live';"
+                "if(k.byLabel(/turn on microphone/i)) return 'muted';"
+                "return 'waiting';})()", gesture=False)
+        except Exception:
+            # A mid-open navigation (the /voice entry, or ChatGPT's own / ->
+            # /c/<id> hop) can briefly kill Runtime.evaluate; keep polling.
+            time.sleep(0.5)
+            continue
         if state == "live":
             live = True
             break
@@ -952,10 +971,16 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
 
     mic = kiosk_call(
         session,
-        "(function(){var m=window.__portalKiosk.byLabel(/turn on microphone/i);"
+        "(function(){var k=window.__portalKiosk;"
+        "var m=k.byLabel(/turn on microphone/i);"
         "if(m){m.click();return 'unmuted';} "
-        "return window.__portalKiosk.byLabel(/turn off microphone/i)?'already-on':'no-mic-control';})()")
-    add_step("mic_on", mic in ("unmuted", "already-on"), str(mic))
+        "if(k.byLabel(/turn off microphone/i)) return 'already-on';"
+        # New UI: no mic toggle exists; the mic starts hot. A live captured
+        # getUserMedia track (see kiosk _micStream) is the on-signal.
+        "if(k._micStream&&k._micStream.getAudioTracks().some(function(t){"
+        "return t.readyState==='live'&&t.enabled;})) return 'track-live';"
+        "return 'no-mic-control';})()")
+    add_step("mic_on", mic in ("unmuted", "already-on", "track-live"), str(mic))
 
     # 4. Focus mode — ChatGPT's own orb-forward view.
     focus = kiosk_call(
@@ -1096,10 +1121,15 @@ def _graceful_end_call() -> Dict[str, Any]:
         sess.connect(timeout=6)
         sess.send("Runtime.enable", {}, timeout=4)
         val = js_value(sess.evaluate(
-            "(function(){var b=document.querySelectorAll('button'),e=null,f=null;"
+            "(function(){var b=document.querySelectorAll('button'),e=null,f=null,v=false;"
             "for(var i=0;i<b.length;i++){var a=b[i].getAttribute('aria-label')||'';"
-            "if(/end voice/i.test(a))e=b[i]; if(/exit focus mode/i.test(a))f=b[i];}"
-            "if(f)f.click(); if(e){e.click(); return 'ended';} return 'no-end-button';})()",
+            "if(/end voice/i.test(a))e=b[i]; if(/exit focus mode/i.test(a))f=b[i];"
+            "if(/voice mode selector/i.test(a))v=true;}"
+            "if(f)f.click(); if(e){e.click(); return 'ended';}"
+            # New UI has no End-voice button: leaving voice = navigating home.
+            # Force-stop remains the guarantee either way.
+            "if(v){location.assign('https://chatgpt.com/'); return 'ended';}"
+            "return 'no-end-button';})()",
             user_gesture=True, timeout=6))
         try:
             sess.evaluate("window.__portalKiosk&&window.__portalKiosk.release()", timeout=5)
@@ -1387,7 +1417,8 @@ def _resume_voice_if_dropped() -> Optional[str]:
         live = js_value(sess.evaluate(
             "(function(){var b=document.querySelectorAll('button');"
             "for(var i=0;i<b.length;i++){var a=b[i].getAttribute('aria-label')||'';"
-            "if(/end voice/i.test(a)) return true;} return false;})()", timeout=6))
+            "if(/end voice/i.test(a)||/voice mode selector/i.test(a)) return true;}"
+            "return false;})()", timeout=6))
         if live is True:
             # Call is fine; just make sure the tab we track is the current one.
             if ws_url != lane.get("ws_debugger_url"):

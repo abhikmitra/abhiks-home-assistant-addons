@@ -107,7 +107,10 @@
   if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
     var origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = function (c) {
-      return origGUM(c).then(function (s) { try { watch(s, 'mic'); } catch (e) {} return s; });
+      return origGUM(c).then(function (s) {
+        try { watch(s, 'mic'); K._micStream = s; } catch (e) {}
+        return s;
+      });
     };
   }
 
@@ -314,8 +317,16 @@
       everHeardMic: K.everHeardMic,
       everHeardSpeaker: K.everHeardSpeaker,
       kioskApplied: K.kioskApplied,
-      voiceLive: !!byLabel(/end voice/i),
-      micOn: !!byLabel(/turn off microphone/i),
+      // Two ChatGPT web UIs coexist (2026-08-03 update): the old one signals a
+      // live call with an "End voice" button and has an explicit mic toggle;
+      // the new one (entered via chatgpt.com/voice) signals it with the
+      // "Voice mode selector" control and starts the mic hot with no toggle —
+      // there, a live captured mic track IS the mic-on signal.
+      voiceLive: !!(byLabel(/end voice/i) || byLabel(/voice mode selector/i)),
+      micOn: !!byLabel(/turn off microphone/i) ||
+        !!(K._micStream && K._micStream.getAudioTracks().some(function (t) {
+          return t.readyState === 'live' && t.enabled;
+        })),
       focusMode: !!byLabel(/exit focus mode/i),
       orbVisible: !!orbEl(),
       hasChip: !!document.getElementById(CHIP),
