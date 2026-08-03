@@ -130,6 +130,28 @@
     window.RTCPeerConnection = PatchedPC;
   }
 
+  // New UI (2026-08-03): reply audio can be routed through an <audio>/<video>
+  // element whose srcObject comes from a peer connection this patch never saw
+  // (e.g. created in a worker) — everHeardSpeaker stayed false for the whole
+  // call while the OS-level output players were demonstrably running. Tap the
+  // srcObject setter so any MediaStream attached to a media element is watched
+  // as speaker output too.
+  try {
+    var mdesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+    if (mdesc && mdesc.set) {
+      Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+        configurable: true,
+        get: mdesc.get,
+        set: function (s) {
+          try {
+            if (s && s.getAudioTracks && s.getAudioTracks().length) watch(s, 'spk');
+          } catch (e) {}
+          return mdesc.set.call(this, s);
+        },
+      });
+    }
+  } catch (e) {}
+
   /* -------------------------------------------------------------- overlay */
   var OV = 'portal-kiosk-overlay';
   function overlay(text, sub) {
