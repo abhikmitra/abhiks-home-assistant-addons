@@ -1,0 +1,42 @@
+---
+name: "Portal ChatGPT Bridge"
+description: "Drives the Meta Portal's ChatGPT web lane (Chrome via ADB+CDP) from the HA box — no Mac required"
+version: "1.1.0"
+slug: "portal_chatgpt_bridge"
+init: false
+
+arch:
+  - aarch64
+  - amd64
+
+url: "https://github.com/abhikmitra/Day2DayAgentHelp/tree/main/Agent-Tooling/meta-portal"
+
+startup: services
+boot: auto
+watchdog: "http://[HOST]:8767/api/health"
+
+ports:
+  8767/tcp: 8767
+ports_description:
+  8767/tcp: "Bridge HTTP API (health/status/start/stop)"
+
+map:
+  - config:rw
+
+options:
+  hass_token: ""
+  ha_url: "http://192.168.4.62:8123"
+  portal_serial: "192.168.4.71:5555"
+  allowed_clients: "127.0.0.1,192.168.4.62,192.168.4.113,172.30.32.2"
+  idle_timeout_sec: 600
+  voice_idle_sec: 60
+  lane_grace_sec: 45
+
+schema:
+  hass_token: password
+  ha_url: str
+  portal_serial: str
+  allowed_clients: str
+  idle_timeout_sec: int
+  voice_idle_sec: int
+  lane_grace_sec: int
