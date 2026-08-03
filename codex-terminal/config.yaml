@@ -1,0 +1,50 @@
+---
+name: "Codex Terminal"
+description: "Terminal interface for OpenAI's Codex CLI with persistent auth"
+version: "0.1.0"
+slug: "codex_terminal"
+init: false
+
+# Supported architectures
+arch:
+  - aarch64
+  - amd64
+  - armv7
+
+# External resources
+url: "https://github.com/openai/codex"
+
+# Web interface configuration
+ingress: true
+ingress_port: 7682
+panel_icon: mdi:code-braces
+panel_title: "Codex Terminal"
+panel_admin: true
+
+# Port configuration
+ports:
+  7682/tcp: 7682
+ports_description:
+  7682/tcp: "Web terminal (not required for ingress)"
+
+# Add-on configuration options
+options:
+  auto_launch_codex: true
+schema:
+  auto_launch_codex: bool?
+
+# Volume mappings for file access
+map:
+  - config:rw    # Access to Home Assistant configuration files
+
+# API access for Home Assistant integration
+hassio_api: true
+hassio_role: manager
+homeassistant_api: true
+auth_api: true
+
+# Service startup configuration
+startup: services
+
+# Web UI access URL
+webui: http://[HOST]:[PORT:7682]/
