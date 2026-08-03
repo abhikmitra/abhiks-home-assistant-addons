@@ -27,9 +27,10 @@ RUN npm install -g @openai/codex@latest \
 RUN mkdir -p /config/codex-config
 WORKDIR /config
 
-# Copy startup script
+# Copy startup script and flap digest
 COPY run.sh /run.sh
-RUN chmod +x /run.sh
+COPY flap.py /opt/flap.py
+RUN chmod +x /run.sh /opt/flap.py
 
 # Use exec form for better signal handling
 CMD ["/run.sh"]

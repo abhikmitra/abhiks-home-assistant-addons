@@ -51,9 +51,32 @@ start_web_terminal() {
         bash -c "$launch_command"
 }
 
+# Codex flap digest: every N minutes ask Codex for one board-worthy line and
+# fire a portal_toast event (source_key codex_flap, ambient). 0 disables.
+# Manual trigger from the web terminal: `flap-now`.
+start_flap_loop() {
+    local interval
+    interval=$(bashio::config 'flap_interval_minutes' '60')
+    cp /opt/flap.py /usr/local/bin/flap-now
+    chmod +x /usr/local/bin/flap-now
+    if [ "$interval" -le 0 ] 2>/dev/null; then
+        bashio::log.info "Flap digest disabled (flap_interval_minutes=$interval)"
+        return 0
+    fi
+    bashio::log.info "Flap digest every ${interval}m (first run in 2m)"
+    (
+        sleep 120
+        while true; do
+            python3 /opt/flap.py || bashio::log.warning "flap digest run failed"
+            sleep $(( interval * 60 ))
+        done
+    ) &
+}
+
 main() {
     bashio::log.info "Initializing Codex Terminal add-on..."
     init_environment
+    start_flap_loop
     start_web_terminal
 }
 
