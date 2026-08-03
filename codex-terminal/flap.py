@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Codex flap digest: ask Codex for one interesting thing, fit it to the
-Portal split-flap board (4 rows x 17 cells so Nanit never cuts it off),
+Portal split-flap board (6 rows x 17 cells),
 and fire a portal_toast event via the Supervisor API.
 
 Toast contract: Day2DayAgentHelp/Agent-Tooling/meta-portal/
@@ -14,7 +14,7 @@ import subprocess
 import sys
 import urllib.request
 
-ROWS = 4
+ROWS = 6
 COLS = 17
 CHARSET = re.compile(r"[^A-Z0-9 %:'\-]")
 
@@ -22,7 +22,7 @@ PROMPT = (
     "You write one message for a household split-flap display (like an airport "
     "departure board). Give me ONE interesting thing right now: a notable news "
     "headline you know of, a striking quote, or a surprising fact. Vary the type "
-    "between runs. Constraints: plain text, max 60 characters total, only "
+    "between runs. Constraints: plain text, max 100 characters total, only "
     "letters, digits, spaces, percent, colon, apostrophe, hyphen. No word longer "
     "than 17 characters. No preamble, no quotes around it — reply with the "
     "message text ONLY."
