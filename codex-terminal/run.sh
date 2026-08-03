@@ -66,9 +66,10 @@ start_flap_loop() {
     bashio::log.info "Flap digest every ${interval}m (first run in 2m)"
     (
         sleep 120
+        python3 /opt/flap.py "add-on started" || bashio::log.warning "flap digest run failed"
         while true; do
-            python3 /opt/flap.py || bashio::log.warning "flap digest run failed"
             sleep $(( interval * 60 ))
+            python3 /opt/flap.py "interval tick (every ${interval}m)" || bashio::log.warning "flap digest run failed"
         done
     ) &
 }
