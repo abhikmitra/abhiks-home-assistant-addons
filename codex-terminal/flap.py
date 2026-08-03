@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Codex flap digest — the Portal Hub's "organic brain".
+"""Codex flap digest — the Portal Hub's "organic brain", agentic edition.
 
-Wakes (interval / add-on start / manual flap-now), snapshots the house from
-the Supervisor API, then lets Codex agentically decide the single most
-valuable message for the split-flap board (5 rows x 17 cells = 85 chars)
-and fires it as a portal_toast event.
+Wakes (interval / add-on start / manual flap-now) and hands Codex the keys:
+it must QUERY Home Assistant itself (multiple curl tool calls against the
+core API), decide the single most valuable message for the split-flap board
+(5 rows x 17 cells = 85 chars), and reply with it. This script only
+sanitizes the reply and fires the portal_toast event.
 
 Toast contract: Day2DayAgentHelp/Agent-Tooling/meta-portal/
 portal-voice-states-and-toast-spec.md — coalesced by source_key, ambient
@@ -18,67 +19,91 @@ import sys
 import time
 import urllib.request
 
-ROWS = 5
+ROWS = 3
 COLS = 17
 CHARSET = re.compile(r"[^A-Z0-9 %:'\-]")
 
-STATE_ENTITIES = {
-    "night_mode": "input_boolean.night_mode",
-    "away_mode": "input_boolean.away_mode",
-    "tv_mode": "input_boolean.tv_mode",
-    "barbecue_mode": "input_boolean.barbecue_mode",
-    "abhik": "person.abhikmitra89uk",
-    "anushree": "person.anushree_bagchi",
-    "malay": "person.malay_mitra",
-    "volvo_location": "device_tracker.volvo_xc60_location",
-    "volvo_battery_pct": "sensor.volvo_xc60_battery",
-    "volvo_charging_power": "sensor.volvo_xc60_charging_power",
-    "volvo_range_est": "sensor.volvo_xc60_distance_to_empty_battery",
-    "volvo_charging_now": "binary_sensor.volvo_charging_started",
-    "weather": "weather.forecast_home",
-}
+MODEL = "gpt-5.6-terra"
+REASONING = "max"
+
+# Base URL for the HA core REST API. In the add-on this is the Supervisor
+# proxy; override with FLAP_HA_API + FLAP_HA_TOKEN to test from a dev box.
+HA_API = os.environ.get("FLAP_HA_API", "http://supervisor/core/api")
+
+
+def _token() -> str:
+    return os.environ.get("FLAP_HA_TOKEN") or os.environ["SUPERVISOR_TOKEN"]
+
 
 PROMPT_TEMPLATE = """\
 You are the Portal Hub's organic brain — the flap-aware side of Jarvis, \
-waking up inside the house's Home Assistant box for one job: decide what \
-the living-room split-flap board should say right now, and say it.
+waking up inside the house's Home Assistant box for one job: investigate \
+the house, then decide what the living-room split-flap board should say \
+right now, and say it.
 
 WAKE REASON: {reason}
-LOCAL TIME: {now}
+DATE AND TIME AT THE HOUSE: {now}
+HOUSE LOCATION: a family home in North-West London (Pinner/Harrow area), \
+United Kingdom.
 
-THE DISPLAY: a physical Solari split-flap board on the family Portal. \
-EXACTLY 5 rows x 17 boxes = 85 characters total budget. Uppercase. Only \
-letters, digits, spaces and % : ' - survive; every other character is \
-dropped before render. No single word longer than 17 characters. Text \
-wraps word-safe across rows.
+THE DISPLAY: a physical Solari split-flap board on the family Portal, \
+17 boxes per row. The board is SHARED: other messages (quotes, TV and car \
+events) stack on it too, and whatever does not fit the leftover rows gets \
+cut off with an ellipsis. So your message must stay short enough to \
+survive being pushed down: AIM FOR 40 CHARACTERS OR FEWER, never more \
+than 51 (3 rows). Uppercase. Only letters, digits, spaces and % : ' - \
+survive; every other character is dropped before render. No single word \
+longer than 17 characters. Text wraps word-safe across rows.
 
-THE HOUSE, live snapshot:
-{state}
+YOU MUST INVESTIGATE BEFORE YOU WRITE. You have shell access. Query the \
+Home Assistant REST API — several calls, not one:
 
-RECENTLY SHOWN on the board — do NOT repeat any of these:
+  curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    {ha_api}/states/<entity_id>          # one entity
+  curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    {ha_api}/states                      # everything (large; filter with jq/grep)
+  curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    "{ha_api}/history/period/<iso-start>?filter_entity_id=<entity_id>"
+
+Starting points (verify live, then dig wherever looks interesting):
+  input_boolean.night_mode / away_mode / tv_mode / barbecue_mode
+  person.abhikmitra89uk (Abhik)  person.anushree_bagchi (Anushree)  \
+person.malay_mitra (Malay)
+  device_tracker.volvo_xc60_location  sensor.volvo_xc60_battery  \
+sensor.volvo_xc60_charging_power  sensor.volvo_xc60_distance_to_empty_battery
+  weather.forecast_home (state + attributes hold the forecast)
+  sensor.portal_toast_feed (attributes.toasts = what the board recently showed)
+
+You are also inside the Home Assistant config directory — read the YAML if \
+an entity's meaning is unclear. Household: Abhik, Anushree, their toddler \
+Tintin (the nursery is Tintin's room), and Malay (Abhik's father). The car \
+is a Volvo XC60 EV. To-dos are already shown elsewhere on this screen.
+
+RECENTLY SHOWN on the board (with times) — do NOT repeat any of these:
 {recent}
-
-You are running inside the Home Assistant config directory: explore the \
-YAML here if it helps you understand a state (rooms, automations, what an \
-entity means). Household: Abhik, Anushree, their toddler Tintin (the \
-nursery is Tintin's room), and Malay (Abhik's father). The car is a Volvo \
-XC60 EV. To-dos are already shown elsewhere on this screen.
 
 Pick the SINGLE most valuable message, preferring in this order:
 1. A warning or unusual state (charging fault, odd mode combo, something \
-in the snapshot that looks wrong).
+that looks wrong).
 2. A meaningful transition: someone reached the office or got home, car \
 started charging, charge complete with the %.
 3. Something useful for whoever is OUT of the house right now.
-4. A weather change worth acting on: rain coming, unusual temp swing.
-5. A piece of news you genuinely know and are confident of — never \
-invent, guess, or dress something up as breaking news.
-6. Otherwise: a funny quip or an inspirational quote — vary the flavour \
+4. A weather change worth acting on: rain coming, unusual temp swing — \
+check the forecast attributes, not just the current state.
+5. A pattern or anomaly YOU noticed while exploring (history is available) \
+— surprises we did not think to automate are welcome.
+6. A piece of news you genuinely know and are confident of — never invent \
+or dress something up as breaking news.
+7. Otherwise: a funny quip or an inspirational quote — vary the flavour \
 run to run.
 
-NEVER: to-dos, "everyone is home" or any other default-normal state, \
-live claims you cannot verify (train delays, headlines you are unsure \
-of), or numbers the dashboard already shows unchanged.
+STYLE: say ONE thing only, as one plain simple-English sentence. Do not \
+string several facts together with dashes or AND. Simple words beat clever \
+compression.
+
+NEVER: to-dos, "everyone is home" or any other default-normal state, live \
+claims you cannot verify (train delays, headlines you are unsure of), or \
+numbers the dashboard already shows unchanged.
 
 Reply with the board message text ONLY — no preamble, no quotes around it.\
 """
@@ -86,68 +111,64 @@ Reply with the board message text ONLY — no preamble, no quotes around it.\
 
 def _api(path: str):
     req = urllib.request.Request(
-        f"http://supervisor/core/api/{path}",
-        headers={"Authorization": f"Bearer {os.environ['SUPERVISOR_TOKEN']}"},
+        f"{HA_API}/{path}",
+        headers={"Authorization": f"Bearer {_token()}"},
     )
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read())
 
 
-def house_state() -> dict:
-    out = {}
-    for key, entity in STATE_ENTITIES.items():
-        try:
-            s = _api(f"states/{entity}")
-            out[key] = s.get("state")
-            if key == "weather":
-                out["temp_c"] = (s.get("attributes") or {}).get("temperature")
-        except Exception:
-            out[key] = "unknown"
-    return out
-
-
-def recent_bodies() -> list[str]:
+def recent_with_times() -> str:
     try:
         s = _api("states/sensor.portal_toast_feed")
-        return [t.get("body", "") for t in (s.get("attributes") or {}).get("toasts", [])][:5]
+        toasts = (s.get("attributes") or {}).get("toasts", [])[:5]
+        lines = []
+        for t in toasts:
+            hhmm = (t.get("ts") or "")[11:16] or "??:??"
+            lines.append(f"- [{hhmm}] {t.get('body', '')}")
+        return "\n".join(lines) or "- (nothing)"
     except Exception:
-        return []
+        return "- (feed unavailable)"
 
 
 def build_prompt(reason: str) -> str:
-    state = house_state()
-    recent = recent_bodies()
     return PROMPT_TEMPLATE.format(
         reason=reason,
-        now=time.strftime("%A %d %B %Y, %H:%M"),
-        state=json.dumps(state, indent=2),
-        recent="\n".join(f"- {b}" for b in recent) or "- (nothing)",
+        now=time.strftime("%A %d %B %Y, %H:%M %Z"),
+        ha_api=HA_API,
+        recent=recent_with_times(),
     )
 
 
 def ask_codex(prompt: str) -> str:
     cmd = [
-        "codex", "-a", "never", "-s", "read-only",
+        "codex", "-a", "never", "-s", "danger-full-access",
+        "-m", MODEL, "-c", f'model_reasoning_effort="{REASONING}"',
         "exec", "--json", "--skip-git-repo-check",
         "-C", "/config",
         prompt,
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
     last = ""
+    tool_calls = 0
     for line in out.stdout.splitlines():
         try:
             ev = json.loads(line)
         except ValueError:
             continue
         item = ev.get("item") or {}
-        if isinstance(item, dict) and item.get("type") == "agent_message" and item.get("text"):
-            last = item["text"].strip()
+        if isinstance(item, dict):
+            if item.get("type") == "command_execution":
+                tool_calls += 1
+            if item.get("type") == "agent_message" and item.get("text"):
+                last = item["text"].strip()
         if ev.get("type") == "assistant":
             for c in (ev.get("message") or {}).get("content") or []:
                 if isinstance(c, dict) and c.get("type") == "output_text" and c.get("text"):
                     last = c["text"].strip()
     if not last:
         raise RuntimeError(f"no agent message (rc={out.returncode}): {out.stderr[-400:]}")
+    print(f"flap: codex made {tool_calls} tool calls", file=sys.stderr)
     return last
 
 
@@ -174,7 +195,7 @@ def fit_board(text: str) -> str:
 
 def post_toast(body: str) -> None:
     req = urllib.request.Request(
-        "http://supervisor/core/api/events/portal_toast",
+        f"{HA_API}/events/portal_toast",
         data=json.dumps({
             "source_key": "codex_flap",
             "severity": "ambient",
@@ -183,7 +204,7 @@ def post_toast(body: str) -> None:
             "icon": "mdi:robot-outline",
         }).encode(),
         headers={
-            "Authorization": f"Bearer {os.environ['SUPERVISOR_TOKEN']}",
+            "Authorization": f"Bearer {_token()}",
             "Content-Type": "application/json",
         },
     )
