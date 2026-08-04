@@ -1,7 +1,7 @@
 ---
 name: "Codex Terminal"
 description: "Terminal interface for OpenAI's Codex CLI with persistent auth"
-version: "0.4.1"
+version: "0.4.2"
 slug: "codex_terminal"
 init: false
 
