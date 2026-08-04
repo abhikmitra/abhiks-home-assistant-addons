@@ -70,8 +70,11 @@ start_flap_loop() {
             sleep 5
             elapsed=$(( elapsed + 5 ))
             local state
+            # `|| true`: run.sh's set -e is inherited here — without the guard one
+            # failed poll (supervisor API not ready after restart) kills this
+            # watcher permanently and the refresh button wedges.
             state=$(curl -s -m 8 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-                "http://supervisor/core/api/states/${refresh_entity}" | jq -r '.state' 2>/dev/null)
+                "http://supervisor/core/api/states/${refresh_entity}" 2>/dev/null | jq -r '.state' 2>/dev/null || true)
             if [ "$state" = "on" ]; then
                 bashio::log.info "Flap refresh requested from Portal button"
                 python3 /opt/flap.py "manual refresh from the Portal board button" \
