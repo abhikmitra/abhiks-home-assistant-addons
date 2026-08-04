@@ -85,9 +85,15 @@ start_flap_loop() {
                     "http://supervisor/core/api/services/input_boolean/turn_off" > /dev/null
                 elapsed=0
             elif [ "$interval" -gt 0 ] 2>/dev/null && [ "$elapsed" -ge $(( interval * 60 )) ]; then
-                python3 /opt/flap.py "interval tick (every ${interval}m)" \
-                    || bashio::log.warning "flap digest run failed"
-                elapsed=0
+                if python3 /opt/flap.py "interval tick (every ${interval}m)"; then
+                    elapsed=0
+                else
+                    # A failed run must NOT wait the full hour — that is how the
+                    # board went dry for 65 min on 2026-08-04 (revoked token).
+                    # Retry in 10 minutes instead.
+                    bashio::log.warning "flap digest run failed — retrying in 10m"
+                    elapsed=$(( interval * 60 - 600 ))
+                fi
             fi
         done
     ) &
