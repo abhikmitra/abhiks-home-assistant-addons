@@ -52,24 +52,40 @@ start_web_terminal() {
 }
 
 # Codex flap digest: every N minutes ask Codex for one board-worthy line and
-# fire a portal_toast event (source_key codex_flap, ambient). 0 disables.
-# Manual trigger from the web terminal: `flap-now`.
+# fire a portal_toast event (source_key codex_flap, ambient). 0 disables the
+# scheduled tick but the refresh button still works.
+# Manual triggers: `flap-now` in the web terminal, or the Portal's
+# "Refresh board" button (input_boolean.portal_flap_refresh — polled every
+# 5s; held on while the run is in flight so the button can show live state).
 start_flap_loop() {
     local interval
     interval=$(bashio::config 'flap_interval_minutes' '60')
     cp /opt/flap.py /usr/local/bin/flap-now
     chmod +x /usr/local/bin/flap-now
-    if [ "$interval" -le 0 ] 2>/dev/null; then
-        bashio::log.info "Flap digest disabled (flap_interval_minutes=$interval)"
-        return 0
-    fi
-    bashio::log.info "Flap digest every ${interval}m (first run in 2m)"
+    bashio::log.info "Flap digest: interval=${interval}m, refresh-button watcher every 5s"
     (
-        sleep 120
-        python3 /opt/flap.py "add-on started" || bashio::log.warning "flap digest run failed"
+        local refresh_entity="input_boolean.portal_flap_refresh"
+        local elapsed=$(( interval > 0 ? interval * 60 - 120 : 0 ))  # first tick 2m after boot
         while true; do
-            sleep $(( interval * 60 ))
-            python3 /opt/flap.py "interval tick (every ${interval}m)" || bashio::log.warning "flap digest run failed"
+            sleep 5
+            elapsed=$(( elapsed + 5 ))
+            local state
+            state=$(curl -s -m 8 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+                "http://supervisor/core/api/states/${refresh_entity}" | jq -r '.state' 2>/dev/null)
+            if [ "$state" = "on" ]; then
+                bashio::log.info "Flap refresh requested from Portal button"
+                python3 /opt/flap.py "manual refresh from the Portal board button" \
+                    || bashio::log.warning "flap refresh run failed"
+                curl -s -m 8 -X POST -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"entity_id\":\"${refresh_entity}\"}" \
+                    "http://supervisor/core/api/services/input_boolean/turn_off" > /dev/null
+                elapsed=0
+            elif [ "$interval" -gt 0 ] 2>/dev/null && [ "$elapsed" -ge $(( interval * 60 )) ]; then
+                python3 /opt/flap.py "interval tick (every ${interval}m)" \
+                    || bashio::log.warning "flap digest run failed"
+                elapsed=0
+            fi
         done
     ) &
 }
