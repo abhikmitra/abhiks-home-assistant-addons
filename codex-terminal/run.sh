@@ -90,9 +90,40 @@ start_flap_loop() {
     ) &
 }
 
+# ChatGPT-app remote control: run the app-server with remote control enabled
+# so the phone app can drive this Codex. Uses the standalone build installed
+# under /data (the npm build ships no daemon, and codex's own daemonizer
+# can't read /proc start times in this container — so we background it
+# ourselves and keep it alive with a lightweight respawn loop).
+# Pair from a terminal window: `codex-remote pair`.
+start_remote_control() {
+    local codex_bin="/data/codex-bin/codex"
+    if [ ! -x "$codex_bin" ]; then
+        bashio::log.info "Remote control: standalone codex not installed (/data/codex-bin) — skipping"
+        return 0
+    fi
+    cat > /usr/local/bin/codex-remote <<'EOSH'
+#!/bin/sh
+exec env CODEX_HOME=/data/.codex /data/codex-bin/codex remote-control "$@"
+EOSH
+    chmod +x /usr/local/bin/codex-remote
+    bashio::log.info "Remote control: starting app-server (respawn on exit)"
+    (
+        while true; do
+            CODEX_HOME=/data/.codex "$codex_bin" app-server --remote-control \
+                --listen unix:///data/.codex/app-server-control/app-server-control.sock \
+                >> /data/.codex/app-server-manual.log 2>&1
+            bashio::log.warning "Remote-control app-server exited; respawning in 30s"
+            sleep 30
+        done
+    ) &
+}
+
 main() {
     bashio::log.info "Initializing Codex Terminal add-on..."
     init_environment
+    mkdir -p /data/.codex/app-server-control
+    start_remote_control
     start_flap_loop
     start_web_terminal
 }
