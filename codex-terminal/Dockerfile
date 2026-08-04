@@ -30,6 +30,7 @@ WORKDIR /config
 # Copy startup script and flap digest
 COPY run.sh /run.sh
 COPY flap.py /opt/flap.py
+COPY codex_ha_bridge.py /opt/codex_ha_bridge.py
 RUN chmod +x /run.sh /opt/flap.py
 
 # Use exec form for better signal handling

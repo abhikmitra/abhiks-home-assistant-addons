@@ -119,11 +119,37 @@ EOSH
     ) &
 }
 
+# Portal voice-codex bridge: the same codex_ha_bridge.py that used to run on
+# the Mac, now Green-only. HA's rest_command.run_codex_task posts here and the
+# reply lands in input_text.portal_codex_* for the Portal card + TTS.
+start_codex_bridge() {
+    if [ ! -x /data/codex-bin/codex ]; then
+        bashio::log.info "Codex bridge: standalone codex missing — skipping"
+        return 0
+    fi
+    bashio::log.info "Codex bridge: starting on :8766 (respawn on exit)"
+    (
+        while true; do
+            env CODEX_BIN=/data/codex-bin/codex \
+                CODEX_HOME=/data/.codex \
+                HASS_SERVER=http://supervisor/core \
+                HASS_TOKEN="${SUPERVISOR_TOKEN}" \
+                HA_CONFIG_REPO=/config \
+                CODEX_HA_ALLOWED_CLIENTS="127.0.0.1,::1,172.30.32.1,172.30.32.2,192.168.4.62" \
+                CODEX_HA_REASONING_EFFORT=low \
+                python3 /opt/codex_ha_bridge.py >> /data/codex-bridge.log 2>&1
+            bashio::log.warning "Codex bridge exited; respawning in 30s"
+            sleep 30
+        done
+    ) &
+}
+
 main() {
     bashio::log.info "Initializing Codex Terminal add-on..."
     init_environment
     mkdir -p /data/.codex/app-server-control
     start_remote_control
+    start_codex_bridge
     start_flap_loop
     start_web_terminal
 }
