@@ -211,7 +211,7 @@
       pointerEvents: 'auto', userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'manipulation'
     };
     for (var k in st) b.style[k] = st[k];
-    function fire(e) { e.preventDefault(); e.stopPropagation(); console.log('PORTAL_EXIT'); }
+    function fire(e) { e.preventDefault(); e.stopPropagation(); try{var ts=String(Date.now()); window.__portalExitRequested=ts; try{window.sessionStorage.setItem('__portalExitRequested', ts);}catch(_){}}catch(_){} console.log('PORTAL_EXIT'); }
     b.addEventListener('click', fire, { capture: true });
     b.addEventListener('touchend', fire, { capture: true, passive: false });
     (document.body || document.documentElement).appendChild(b);

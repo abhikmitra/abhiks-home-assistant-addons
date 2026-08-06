@@ -451,10 +451,12 @@ EXIT_CHIP_JS = r"""
       });
       btn.addEventListener('click', function(e){
         e.preventDefault(); e.stopPropagation();
+        try{var ts=String(Date.now()); window.__portalExitRequested=ts; try{window.sessionStorage.setItem('__portalExitRequested', ts);}catch(_){}}catch(_){}
         console.log('PORTAL_EXIT');
       }, {capture:true});
       btn.addEventListener('touchend', function(e){
         e.preventDefault(); e.stopPropagation();
+        try{var ts=String(Date.now()); window.__portalExitRequested=ts; try{window.sessionStorage.setItem('__portalExitRequested', ts);}catch(_){}}catch(_){}
         console.log('PORTAL_EXIT');
       }, {capture:true, passive:false});
       (document.body||document.documentElement).appendChild(btn);
@@ -492,8 +494,8 @@ EXIT_CHIP_NEW_DOC_JS = r"""
         boxShadow:'0 4px 16px rgba(0,0,0,0.6)',cursor:'pointer',
         pointerEvents:'auto',userSelect:'none',touchAction:'manipulation'
       });
-      btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); console.log('PORTAL_EXIT'); }, {capture:true});
-      btn.addEventListener('touchend', function(e){ e.preventDefault(); e.stopPropagation(); console.log('PORTAL_EXIT'); }, {capture:true, passive:false});
+      btn.addEventListener('click', function(e){ e.preventDefault(); e.stopPropagation(); try{var ts=String(Date.now()); window.__portalExitRequested=ts; try{window.sessionStorage.setItem('__portalExitRequested', ts);}catch(_){}}catch(_){} console.log('PORTAL_EXIT'); }, {capture:true});
+      btn.addEventListener('touchend', function(e){ e.preventDefault(); e.stopPropagation(); try{var ts=String(Date.now()); window.__portalExitRequested=ts; try{window.sessionStorage.setItem('__portalExitRequested', ts);}catch(_){}}catch(_){} console.log('PORTAL_EXIT'); }, {capture:true, passive:false});
       document.body.appendChild(btn);
       return true;
     }catch(_){return false;}
@@ -512,6 +514,46 @@ EXIT_CHIP_NEW_DOC_JS = r"""
   try{ mo.observe(document.documentElement,{childList:true,subtree:true}); }catch(_){}
 })();
 """
+
+# ---------------------------------------------------------------------------
+# Exit latch — durable fallback for pre-watcher taps
+# ---------------------------------------------------------------------------
+EXIT_LATCH_KEY = "__portalExitRequested"
+EXIT_LATCH_WINDOW_PROP = "__portalExitRequested"
+
+def cdp_read_exit_latch(session) -> tuple[bool, Any]:
+    """Read exit latch via CDP. Returns (ok, value_or_None). Value is timestamp string if present."""
+    try:
+        res = session.evaluate(
+            "(function(){try{var v=null;try{v=window.__portalExitRequested;}catch(e){} if(v) return String(v); try{var s=window.sessionStorage.getItem('__portalExitRequested'); if(s) return String(s);}catch(e){} return null;}catch(e){return null;}})()",
+            timeout=5)
+        if res.get("result", {}).get("exceptionDetails"):
+            return False, str(res["result"]["exceptionDetails"])[:300]
+        val = res.get("result", {}).get("result", {}).get("value")
+        if val is None or val == "" or val is False:
+            return True, None
+        return True, str(val)
+    except Exception as e:
+        return False, str(e)[:300]
+
+def cdp_clear_exit_latch(session) -> tuple[bool, str]:
+    """Clear both window flag and sessionStorage key. Returns (ok, detail)."""
+    try:
+        res = session.evaluate(
+            "(function(){var err=null;try{try{delete window.__portalExitRequested;}catch(e){err='win-del:'+e;}try{window.__portalExitRequested=undefined;}catch(e){err=(err?err+';':'')+'win-undef:'+e;}}catch(e){err='win-clear:'+e;}try{window.sessionStorage.removeItem('__portalExitRequested');}catch(e){err=(err?err+';':'')+'ss-remove:'+e;}if(err) return 'err:'+err;try{var v=null;try{v=window.__portalExitRequested;}catch(e){return 'err:win-read:'+e;}if(v) return 'err:residual-window:'+String(v).slice(0,80);try{var s=window.sessionStorage.getItem('__portalExitRequested');if(s) return 'err:residual-ss:'+String(s).slice(0,80);}catch(e){return 'err:ss-read:'+e;}}catch(e){return 'err:verify:'+e;}return 'cleared';})()",
+            timeout=5)
+        if res.get("result", {}).get("exceptionDetails"):
+            return False, str(res["result"]["exceptionDetails"])[:300]
+        val = res.get("result", {}).get("result", {}).get("value")
+        if isinstance(val, str) and val.startswith("err"):
+            return False, val[:300]
+        if val == "cleared":
+            return True, "cleared"
+        if val is None:
+            return False, "None"
+        return False, str(val)[:300]
+    except Exception as e:
+        return False, str(e)[:300]
 
 # Voice MODE only — deliberately not "Start dictation", which is speech-to-text
 # into the composer and leaves you tapping Send. This lane wants ChatGPT's
@@ -1288,6 +1330,7 @@ def _stop_lane_locked(reason: str) -> Dict[str, Any]:
 # Exit watcher + idle watchdog threads
 # ---------------------------------------------------------------------------
 def _exit_watcher_loop():
+    global _cdp_ws
     _log_event("exit_watcher_started", None)
     consecutive_failures = 0
     while not _exit_watcher_stop.is_set():
@@ -1314,8 +1357,49 @@ def _exit_watcher_loop():
                           {"source": load_kiosk_js()}, timeout=5)
             except Exception as ex:
                 _log_event("exit_watcher_newdoc_register_failed", str(ex)[:200])
+            # latch deduplication — console is fast path, latch is durable fallback
+            _exit_stop_dispatched = [False]
+            _exit_stop_lock = threading.Lock()
+            def _dispatch_exit(reason: str):
+                with _exit_stop_lock:
+                    if _exit_stop_dispatched[0]:
+                        return
+                    _exit_stop_dispatched[0] = True
+                _set_lane(last_activity_epoch=time.time())
+                stop_lane_impl(reason=reason)
+
+            def _check_exit_latch():
+                try:
+                    ok, val = cdp_read_exit_latch(sess)
+                    if ok and val:
+                        _log_event("exit_latch_received", str(val)[:200])
+                        try:
+                            cdp_clear_exit_latch(sess)
+                        except Exception:
+                            pass
+                        _dispatch_exit("exit_latch_PORTAL_EXIT")
+                        return True
+                except Exception as ex:
+                    _log_event("exit_latch_check_failed", str(ex)[:200])
+                return False
+
+            # immediate latch check after session connected/registered
+            if _check_exit_latch():
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+                with _cdp_ws_lock:
+                    if _cdp_ws is sess:
+                        _cdp_ws = None
+                continue
+
             # closure captures stop logic
             def on_console(msg):
+                # Stale latch is cleared at the next start gate (fail-closed) and
+                # on the watcher-thread latch path; do not clear/evaluate here —
+                # this callback runs on CDPSession._reader_loop's sole reader
+                # thread and a blocking CDP evaluate would deadlock.
                 try:
                     if msg.get("method") == "Runtime.consoleAPICalled":
                         params = msg.get("params", {})
@@ -1323,27 +1407,20 @@ def _exit_watcher_loop():
                         # Look for PORTAL_EXIT in any arg
                         for a in args:
                             v = a.get("value", "") or a.get("description", "") or ""
-                            # Also check deep: if object preview contains string
                             txt = str(v)
-                            # Some consoleAPICalled uses args with value directly
-                            # fallback: check entire params json string
                             if "PORTAL_EXIT" in txt or "PORTAL_EXIT" in json.dumps(params):
                                 _log_event("console_PORTAL_EXIT_received", params)
-                                _set_lane(last_activity_epoch=time.time())
-                                # Run stop
-                                stop_lane_impl(reason="exit_chip_PORTAL_EXIT")
+                                _dispatch_exit("exit_chip_PORTAL_EXIT")
                                 return
-                        # also check stringified params for safety
                         if "PORTAL_EXIT" in json.dumps(params):
                             _log_event("console_PORTAL_EXIT_received_fallback", params)
-                            stop_lane_impl(reason="exit_chip_PORTAL_EXIT_fallback")
+                            _dispatch_exit("exit_chip_PORTAL_EXIT_fallback")
                 except Exception as ex:
                     _log_event("exit_watcher_cb_err", str(ex)[:300])
 
             sess.on_event(on_console)
             # keep ws alive
             with _cdp_ws_lock:
-                global _cdp_ws
                 _cdp_ws = sess
             consecutive_failures = 0
             _log_event("exit_watcher_connected", ws_url[:120])
@@ -1352,12 +1429,11 @@ def _exit_watcher_loop():
                 lane2 = _lane_snapshot()
                 if not lane2.get("active"):
                     break
-                # keepalive: reader thread handles recv; check if ws still alive by ping?
-                # We'll just sleep and let reader thread stay; detect dead by trying evaluate occasionally
                 time.sleep(2)
-                # If lane changed ws_url, break to reconnect
                 if _lane_snapshot().get("ws_debugger_url") != ws_url:
                     _log_event("exit_watcher_ws_url_changed_reconnect", None)
+                    break
+                if _check_exit_latch():
                     break
                 # Re-assert the kiosk layer. Idempotent, and the only thing that
                 # survives chatgpt.com's SPA re-renders and full document swaps.
@@ -1366,9 +1442,6 @@ def _exit_watcher_loop():
                         "(window.__portalKiosk ? 'ok' : 'gone')", timeout=5)
                     if js_value(sess.evaluate("(!!window.__portalKiosk)", timeout=5)) is not True:
                         sess.evaluate(load_kiosk_js(), user_gesture=True, timeout=10)
-                    # Any navigation on chatgpt.com drops fullscreen, which puts the
-                    # browser tab strip and URL bar back on a wall display. Re-enter it.
-                    # userGesture is what makes requestFullscreen legal here.
                     sess.evaluate(
                         "(function(){if(!document.fullscreenElement){"
                         "document.documentElement.requestFullscreen().catch(function(){});"
@@ -1872,6 +1945,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             add_step("cdp_attach", True, ws_url)
         else:
             add_step("cdp_attach", True, ws_url + " (recovered)")
+
+        # 6b. Clear any stale exit latch before exposing chip/mic — fail-closed
+        try:
+            ok_clear, d_clear = cdp_clear_exit_latch(sess)
+            add_step("clear_exit_latch", ok_clear, d_clear)
+            if not ok_clear:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+                sess = None
+                fail_closed(f"exit latch clear failed: {d_clear}")
+                return
+        except Exception as e:
+            add_step("clear_exit_latch", False, str(e)[:300])
+            try:
+                sess.close()
+            except Exception:
+                pass
+            sess = None
+            fail_closed(f"exit latch clear failed: {e}")
+            return
 
         # 7. inject exit chip live + newDocument — fail-closed if missing, never run without visible exit
         ok7, d7 = do_inject_chip(sess)
