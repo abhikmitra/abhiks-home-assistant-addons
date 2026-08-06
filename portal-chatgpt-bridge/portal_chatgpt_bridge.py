@@ -58,7 +58,7 @@ import traceback
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Config
@@ -299,6 +299,26 @@ def cdp_get_chrome_version() -> Optional[str]:
         return None
 
 # Minimal CDP session wrapper over websocket-client
+STALE_PROBE_TIMEOUT_SEC = 4
+
+def cdp_close_target(target_id: str) -> tuple[bool, str]:
+    """Close a specific CDP target via HTTP /json/close. Used for stale recovery."""
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{CDP_PORT}/json/close/{target_id}", timeout=4).read()
+        return True, f"closed {target_id}"
+    except Exception as e:
+        return False, str(e)[:300]
+
+def cdp_open_fresh_chatgpt_tab() -> tuple[bool, str]:
+    """Open one fresh https://chatgpt.com/ tab via ADB VIEW intent."""
+    try:
+        cp = adb_cmd(["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", CHATGPT_URL, "-n", "org.chromium.chrome/com.google.android.apps.chrome.Main"], timeout=15)
+        ok = cp.returncode == 0
+        detail = (cp.stdout + cp.stderr).strip()[:300] or ("opened" if ok else "failed")
+        return ok, detail
+    except Exception as e:
+        return False, str(e)[:300]
+
 class CDPSession:
     def __init__(self, ws_url: str):
         self.ws_url = ws_url
@@ -309,6 +329,7 @@ class CDPSession:
         self._event_callbacks: List[Any] = []
         self._reader_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._last_error: Optional[str] = None
 
     def connect(self, timeout=10):
         import websocket
@@ -339,10 +360,16 @@ class CDPSession:
             except Exception as e:
                 if self._stop.is_set():
                     break
+                with self._lock:
+                    self._last_error = f"{type(e).__name__}: {e}"
                 time.sleep(0.2)
 
     def on_event(self, cb):
         self._event_callbacks.append(cb)
+
+    def _get_last_error(self) -> Optional[str]:
+        with self._lock:
+            return self._last_error
 
     def send(self, method: str, params: Dict[str, Any] = None, timeout=10) -> Dict[str, Any]:
         with self._lock:
@@ -362,7 +389,9 @@ class CDPSession:
                 if cur_id in self._pending:
                     return self._pending.pop(cur_id)
             time.sleep(0.05)
-        raise TimeoutError(f"CDP timeout for {method} id={cur_id}")
+        last = self._get_last_error()
+        suffix = f" (last reader error: {last})" if last else ""
+        raise TimeoutError(f"CDP timeout for {method} id={cur_id}{suffix}")
 
     def evaluate(self, expression: str, user_gesture: bool = False, await_promise: bool = False, timeout: int = 10) -> Dict[str, Any]:
         params = {"expression": expression}
@@ -649,19 +678,38 @@ def do_launch_chrome() -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
-def do_poll_chatgpt_tab(timeout_sec=20) -> tuple[bool, Any]:
+def do_poll_chatgpt_tab(timeout_sec=20, excluded_ids: Optional[Set[str]] = None, excluded_target_ids: Optional[Set[str]] = None) -> tuple[bool, Any]:
     """Poll at 250ms. Every 1s of granularity here is 1s the household spends
     looking at a spinner, and the tab usually appears almost immediately when
     Chrome was left warm."""
+    # Support both param names for backward compat with tests; prefer excluded_ids
+    _ex = excluded_ids if excluded_ids is not None else excluded_target_ids
+    excluded = set(_ex) if _ex else set()
     deadline = time.time() + timeout_sec
     last = None
     while time.time() < deadline:
         ok, data = cdp_list_tabs()
         if ok:
-            tab = cdp_find_chatgpt_tab(data)
+            # Find first chatgpt.com page not in excluded set
+            tab = None
+            if isinstance(data, list):
+                for t in data:
+                    u = t.get("url", "") or ""
+                    tid = t.get("id", "")
+                    if "chatgpt.com" in u and t.get("type") == "page" and tid not in excluded:
+                        tab = t
+                        break
             if tab:
                 return True, tab
-            last = f"no chatgpt tab in {len(data)} tabs: {[t.get('url','')[:80] for t in data[:5]]}"
+            # Determine if failure is due to exclusion (no new target)
+            if excluded and isinstance(data, list):
+                has_excluded_match = any("chatgpt.com" in (t.get("url","") or "") and t.get("type") == "page" and t.get("id") in excluded for t in data)
+                if has_excluded_match:
+                    last = f"no new target appeared (excluded {sorted(excluded)}) in {len(data)} tabs: {[t.get('url','')[:80] for t in data[:5]]}"
+                else:
+                    last = f"no chatgpt tab in {len(data)} tabs: {[t.get('url','')[:80] for t in data[:5]]}"
+            else:
+                last = f"no chatgpt tab in {len(data)} tabs: {[t.get('url','')[:80] for t in data[:5]]}" if isinstance(data, list) else str(data)
         else:
             last = data
         time.sleep(0.25)
@@ -1732,30 +1780,110 @@ class Handler(http.server.BaseHTTPRequestHandler):
         tab_url = tab.get("url")
         tab_id = tab.get("id")
 
-        # 6. attach CDP, enable Runtime and Page
+        # 6. attach CDP with stale-target recovery — Runtime.enable probe before any chip/fullscreen/mic
+        # Must succeed within a short bounded probe; stale tabs hang here and must be replaced.
         sess = None
+        probe_err = None
+        stale_recovered = False
         try:
             sess = CDPSession(ws_url)
             sess.connect(timeout=10)
             try:
-                sess.send("Runtime.enable", {}, timeout=5)
+                sess.send("Runtime.enable", {}, timeout=STALE_PROBE_TIMEOUT_SEC)
                 add_step("cdp_runtime_enable", True, "ok")
             except Exception as e:
-                add_step("cdp_runtime_enable", False, str(e)[:500])
+                probe_err = str(e)[:800]
+                add_step("cdp_runtime_enable", False, probe_err)
+                # --- stale recovery: close exact stale target, open fresh, poll, probe fresh once ---
+                add_step("cdp_stale_probe_failed", False, probe_err)
+                # close stale target via HTTP close endpoint (exact id)
+                try:
+                    ok_close, detail_close = cdp_close_target(tab_id)
+                    add_step("cdp_close_stale_target", ok_close, detail_close)
+                except Exception as ce:
+                    add_step("cdp_close_stale_target", False, str(ce)[:300])
+                # close stale session promptly
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+                sess = None
+                # open one fresh https://chatgpt.com/ tab
+                try:
+                    ok_fresh_open, detail_fresh_open = cdp_open_fresh_chatgpt_tab()
+                    add_step("cdp_open_fresh_tab", ok_fresh_open, detail_fresh_open)
+                    if not ok_fresh_open:
+                        fail_closed(f"stale probe failed ({probe_err}); fresh tab open failed: {detail_fresh_open}")
+                        return
+                except Exception as oe:
+                    add_step("cdp_open_fresh_tab", False, str(oe)[:300])
+                    fail_closed(f"stale probe failed ({probe_err}) and fresh tab open failed: {oe}")
+                    return
+                # poll for fresh page target — exclude the stale id so delayed close never reselects it
+                ok_fresh, fresh_tab_or_detail = do_poll_chatgpt_tab(timeout_sec=15, excluded_ids={tab_id} if tab_id else None)
+                if not ok_fresh:
+                    add_step("poll_fresh_tab", False, str(fresh_tab_or_detail)[:500])
+                    fail_closed(f"stale probe failed ({probe_err}); fresh tab not found: {fresh_tab_or_detail}")
+                    return
+                add_step("poll_fresh_tab", True, json.dumps(fresh_tab_or_detail)[:500] if isinstance(fresh_tab_or_detail, dict) else str(fresh_tab_or_detail)[:500])
+                tab = fresh_tab_or_detail
+                ws_url = tab.get("webSocketDebuggerUrl")
+                tab_url = tab.get("url")
+                tab_id = tab.get("id")
+                if not ws_url:
+                    fail_closed(f"stale probe failed ({probe_err}); fresh tab missing ws_debugger_url: {fresh_tab_or_detail}")
+                    return
+                # connect fresh session and probe Runtime.enable exactly once
+                try:
+                    sess = CDPSession(ws_url)
+                    sess.connect(timeout=10)
+                    sess.send("Runtime.enable", {}, timeout=STALE_PROBE_TIMEOUT_SEC)
+                    add_step("cdp_runtime_enable_fresh", True, "ok")
+                except Exception as e2:
+                    fresh_err = str(e2)[:800]
+                    add_step("cdp_runtime_enable_fresh", False, fresh_err)
+                    try:
+                        if sess:
+                            sess.close()
+                    except Exception:
+                        pass
+                    sess = None
+                    fail_closed(f"stale probe failed ({probe_err}); fresh probe also failed ({fresh_err})")
+                    return
+                stale_recovered = True
+                add_step("cdp_stale_recovered", True, f"recovered from {probe_err[:120]} -> fresh {tab_id}")
+            # if we reached here without stale, or after recovery, enable Page
             try:
                 sess.send("Page.enable", {}, timeout=5)
                 add_step("cdp_page_enable", True, "ok")
             except Exception as e:
                 add_step("cdp_page_enable", False, str(e)[:500])
         except Exception as e:
+            # Covers connect failures before probe; treat as attach failure
             add_step("cdp_attach", False, str(e)[:600])
+            try:
+                if sess:
+                    sess.close()
+            except Exception:
+                pass
             fail_closed(f"CDP attach failed: {e}")
             return
-        add_step("cdp_attach", True, ws_url)
+        if not stale_recovered:
+            add_step("cdp_attach", True, ws_url)
+        else:
+            add_step("cdp_attach", True, ws_url + " (recovered)")
 
-        # 7. inject exit chip live + newDocument
+        # 7. inject exit chip live + newDocument — fail-closed if missing, never run without visible exit
         ok7, d7 = do_inject_chip(sess)
         add_step("inject_exit_chip", ok7, d7)
+        if not ok7:
+            try:
+                sess.close()
+            except Exception:
+                pass
+            sess = None
+            fail_closed(f"exit chip inject failed: {d7}")
+            return
 
         # 8. request fullscreen via Runtime.evaluate userGesture
         ok8, d8 = do_fullscreen(sess)

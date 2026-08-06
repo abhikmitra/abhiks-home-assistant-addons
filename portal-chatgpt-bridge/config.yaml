@@ -1,7 +1,7 @@
 ---
 name: "Portal ChatGPT Bridge"
 description: "Drives the Meta Portal's ChatGPT web lane (Chrome via ADB+CDP) from the HA box — no Mac required"
-version: "1.1.3"
+version: "1.1.4"
 slug: "portal_chatgpt_bridge"
 init: false
 

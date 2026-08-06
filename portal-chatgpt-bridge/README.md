@@ -5,6 +5,8 @@ removing the Mac from the flow entirely. The daemon follows
 `input_boolean.portal_chatgpt_active` over the HA websocket; when the
 HermesPortal ChatGPT button (`#chatgptPill` / `data-tap="chatgpt"` → `chatgpt_on` → `input_boolean.portal_chatgpt_active`) flips it on, the bridge suspends HermesPortal (`am force-stop com.day2day.hermesportal`) to free the mic, then drives the Portal's Chrome over ADB + Chrome DevTools Protocol into a fullscreen, orb-only chatgpt.com voice call. On exit (chip, boolean off, or idle timeout) it clears the boolean, relaunches HermesPortal (`am start -n com.day2day.hermesportal/.MainActivity`) and foreground-verifies it before tearing the lane down cleanly.
 
+**1.1.4 — stale-target recovery:** Stale ChatGPT page targets are replaced once — the exact stale target is closed via `/json/close/{id}`, one fresh `https://chatgpt.com/` tab is opened, and the stale id is excluded when polling for the new target (single re-probe). CDP (`Runtime.enable`) and visible exit-chip (`#portal-exit-chip`) readiness are gated before Hermes microphone release; any failure before that returns to Hermes (lane torn down, boolean cleared, HermesPortal foregrounded).
+
 **Canonical source:** `Day2DayAgentHelp/Agent-Tooling/meta-portal/` — the
 `portal_chatgpt_bridge.py` and `portal_chatgpt_kiosk.js` here are deploy
 copies. Edit there, copy here, bump the version in `config.yaml`, push, then
