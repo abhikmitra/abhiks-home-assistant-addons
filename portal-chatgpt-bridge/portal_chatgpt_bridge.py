@@ -2,13 +2,13 @@
 """
 portal_chatgpt_bridge.py — Second-assistant lane for Meta Portal -> ChatGPT web.
 
-This daemon runs on the Mac (not on the Portal) and drives the Portal's Chrome
+This bridge is HA-hosted-capable (HA Green add-on or Mac) and drives the Portal's Chrome
 browser via ADB + Chrome DevTools Protocol (CDP). It exposes a tiny HTTP API
 that Home Assistant (and local callers) can use to open a ChatGPT voice session
 on the Portal, then reliably tear it down.
 
 Lanes:
-- Existing lanes (Jarvis/VACA/Codex) continue on VACA app (com.msp1974.vacompanion).
+- HermesPortal (com.day2day.hermesportal) is the sole resident surface; this lane suspends it to free the mic.
 - This lane uses org.chromium.chrome to show https://chatgpt.com/ in fullscreen kiosk.
 
 Exit-chip / console-signal design:
@@ -20,7 +20,7 @@ Exit-chip / console-signal design:
 - A self-healing interval (2s) re-adds the chip if React re-renders remove it.
 - A persistent CDP websocket subscribed to Runtime.consoleAPICalled watches for
   that log. When seen it runs the same logic as /api/stop (idempotent):
-  exit fullscreen, force-stop Chrome, relaunch VACA, clear input_boolean, mark
+  exit fullscreen, force-stop Chrome, clear input_boolean, relaunch HermesPortal, mark
   lane inactive.
 - Because the exit signal travels as a CDP console event, it works without extra
   Portal APKs and without trusting DOM mutation observers from the Mac side.
@@ -197,26 +197,16 @@ def get_foreground_activity() -> tuple[Optional[str], str]:
         cp = adb_cmd(["shell", "dumpsys", "window"], timeout=15)
         out = cp.stdout + cp.stderr
         activity = None
+        import re
+        # Generic extraction for any current focus — handles Hermes, Chrome, or any other package.
         for line in out.splitlines():
             if "mCurrentFocus=" in line or "mFocusedApp=" in line:
-                # example: Window{... com.msp1974.vacompanion/com.msp1974.vacompanion.MainActivity}
-                # extract last token containing /
-                # heuristic: find com. substring
-                # try to pull package/activity
-                # Use simple parsing
-                if "com.msp1974.vacompanion" in line:
-                    # try exact
-                    import re
-                    m = re.search(r"(com\.[^\s/]+/[^\s\}]+)", line)
-                    if m:
-                        activity = m.group(1)
-                        break
-                if "org.chromium.chrome" in line:
-                    import re
-                    m = re.search(r"(org\.chromium\.chrome/[^\s\}]+)", line)
-                    if m:
-                        activity = m.group(1)
-                        break
+                # example: Window{... com.day2day.hermesportal/.MainActivity}
+                # or: Window{... org.chromium.chrome/com.google.android.apps.chrome.Main}
+                m = re.search(r"([A-Za-z0-9\._]+/[A-Za-z0-9\._]+)", line)
+                if m:
+                    activity = m.group(1)
+                    break
         # Fallback: get most precise CurrentFocus
         if activity is None:
             import re
@@ -530,23 +520,37 @@ def ha_set_input_boolean(entity_id: str, on: bool) -> tuple[bool, str]:
     except Exception as ex:
         return False, f"HA call error: {ex}"
 
-VACA_MUTE_SWITCH = "switch.vaca_54e9e343e_mute"
+HERMES_PACKAGE = "com.day2day.hermesportal"
+HERMES_ACTIVITY = "com.day2day.hermesportal/.MainActivity"
 
-def ha_set_switch(entity_id: str, on: bool) -> tuple[bool, str]:
-    """Same shape as ha_set_input_boolean but for the switch domain."""
-    if not HA_URL or not HASS_TOKEN:
-        return False, "HA_URL or HASS_TOKEN missing, skipping"
-    service = "turn_on" if on else "turn_off"
-    url = f"{HA_URL.rstrip('/')}/api/services/switch/{service}"
-    body = json.dumps({"entity_id": entity_id}).encode()
-    req = urllib.request.Request(url, data=body, method="POST",
-                                 headers={"Authorization": f"Bearer {HASS_TOKEN}",
-                                          "Content-Type": "application/json"})
+def _suspend_hermes_for_chatgpt() -> tuple[bool, str]:
+    """Force-stop HermesPortal to release its VoiceService mic before ChatGPT owns it."""
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return resp.status in (200, 201), resp.read().decode()[:300]
-    except Exception as ex:
-        return False, f"HA call error: {ex}"
+        cp = adb_cmd(["shell", "am", "force-stop", HERMES_PACKAGE], timeout=10)
+        ok = cp.returncode == 0
+        detail = (cp.stdout + cp.stderr).strip()[:300] or ("force-stop ok" if ok else "force-stop failed")
+        return ok, detail
+    except Exception as e:
+        return False, str(e)[:300]
+
+
+def _relaunch_hermes() -> dict:
+    """Relaunch HermesPortal and poll until it is foreground."""
+    try:
+        cp = adb_cmd(["shell", "am", "start", "-n", HERMES_ACTIVITY], timeout=15)
+        detail = (cp.stdout + cp.stderr)[:200] if hasattr(cp, "stdout") else ""
+        if getattr(cp, "returncode", 0) != 0:
+            return {"ok": False, "settled": False, "detail": detail}
+        deadline = time.monotonic() + 12
+        settled = False
+        while time.monotonic() < deadline:
+            time.sleep(0.4)
+            if get_foreground_package() == HERMES_PACKAGE:
+                settled = True
+                break
+        return {"ok": True, "settled": settled, "detail": detail}
+    except Exception as e:
+        return {"ok": False, "settled": False, "err": str(e)[:300]}
 
 # ---------------------------------------------------------------------------
 # Core lane logic (start / stop)
@@ -870,7 +874,7 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
     # Chrome MUST own the screen for the whole open. Backgrounded on Android 9
     # it loses the microphone and its timers are throttled, so the WebRTC call
     # silently never connects and the sequence times out at 30s with a dead
-    # orb. VACA's relaunch from a previous teardown is what usually steals the
+    # orb. HermesPortal's relaunch from a previous teardown is what usually steals the
     # front, and it lands late enough to hit us mid-open.
     ensure_chrome_foreground()
 
@@ -1093,9 +1097,9 @@ def _mic_released_by_chrome() -> bool:
     """True when Chrome is no longer holding a capture session.
 
     The whole warm-tab optimisation rests on this: if ending the call really
-    frees the microphone we can leave Chrome running, and Jarvis still gets its
+    frees the microphone we can leave Chrome running, and Hermes still gets its
     ears back. If it does not, we must force-stop, or the household is left
-    with a deaf Jarvis — the exact failure this guard prevents.
+    with a deaf Hermes — the exact failure this guard prevents.
     """
     try:
         cp = adb_cmd(["shell", "dumpsys", "audio"], timeout=12)
@@ -1213,36 +1217,20 @@ def _stop_lane_locked(reason: str) -> Dict[str, Any]:
     except Exception as e:
         results["force_stop_chrome"] = {"ok": False, "err": str(e)[:300]}
 
-    # Relaunch VACA
-    try:
-        cp = adb_cmd(["shell", "monkey", "-p", "com.msp1974.vacompanion", "-c", "android.intent.category.LAUNCHER", "1"], timeout=15)
-        # Block until VACA is really in front. Returning early is what lets a
-        # late relaunch land in the middle of the NEXT open and steal the
-        # screen from Chrome.
-        deadline = time.time() + 12
-        settled = False
-        while time.time() < deadline:
-            time.sleep(0.4)
-            if get_foreground_package() == "com.msp1974.vacompanion":
-                settled = True
-                break
-        results["relaunch_vaca"] = {"ok": True, "settled": settled}
-    except Exception as e:
-        results["relaunch_vaca"] = {"ok": False, "err": str(e)[:300]}
-
-    # HA off
+    # HA off — clear the lane boolean before returning to Hermes
     try:
         ok, detail = ha_set_input_boolean("input_boolean.portal_chatgpt_active", False)
         results["ha_off"] = {"ok": ok, "detail": detail[:400]}
     except Exception as e:
         results["ha_off"] = {"ok": False, "err": str(e)[:300]}
 
-    # Give Jarvis its ears back — the start path muted VACA to free the mic.
+    # Relaunch HermesPortal — sole resident surface after ChatGPT
+    # Never force-stop com.facebook.portal.webview directly; it is the internal renderer recreated with Hermes.
     try:
-        ok, detail = ha_set_switch(VACA_MUTE_SWITCH, False)
-        results["vaca_mic_unmuted"] = {"ok": ok, "detail": detail[:300]}
+        rel = _relaunch_hermes()
+        results["relaunch_hermes"] = rel
     except Exception as e:
-        results["vaca_mic_unmuted"] = {"ok": False, "err": str(e)[:300]}
+        results["relaunch_hermes"] = {"ok": False, "settled": False, "err": str(e)[:300]}
 
     _set_lane(active=False, chatgpt_tab_url=None, chatgpt_tab_id=None, ws_debugger_url=None)
     _log_event("stop_complete", results)
@@ -1451,20 +1439,18 @@ def _idle_watchdog_loop():
         lane = _lane_snapshot()
         if not lane.get("active"):
             continue
-        # Check foreground. VACA re-fronts ITSELF while the lane is open (the
-        # presence automation wakes the screen when someone stands near the
-        # Portal — i.e. exactly when someone is using ChatGPT), so a foreground
-        # flip to VACA is noise, not an exit: shove Chromium back to the front.
-        # The lane has exactly three legitimate exits — the on-screen chip, the
-        # HA boolean, and the idle timeout below. Give up re-fronting only if
-        # it clearly isn't sticking.
+        # Check foreground. HermesPortal was force-stopped for this ChatGPT lane
+        # to free the microphone, so any unexpected non-Chrome foreground package
+        # is treated as a transient takeover to heal generically by re-fronting
+        # Chromium. The lane has exactly three legitimate exits — the on-screen
+        # chip, the HA boolean, and the idle timeout below. Give up re-fronting
+        # only if it clearly isn't sticking.
         try:
             pkg = get_foreground_package()
             if pkg and pkg != "org.chromium.chrome":
-                # Require two consecutive misses. A single miss is almost always
-                # a transient — most often VACA's own relaunch from the previous
-                # lane's teardown landing late — and re-fronting Chrome into
-                # that race reloads the renderer and kills the live call.
+                # Require two consecutive misses. A single miss is often a
+                # transient foreground blip, and re-fronting Chrome into that
+                # race can reload the renderer and kill the live call.
                 misses = (_lane_snapshot().get("fg_misses") or 0) + 1
                 _set_lane(fg_misses=misses)
                 if misses < 2:
@@ -1497,7 +1483,7 @@ def _idle_watchdog_loop():
         # Idle is measured in SPEECH, not wall-clock: the kiosk layer taps the
         # microphone and ChatGPT's WebRTC reply track, so a long thinking pause
         # or a slow reply never counts as idle, and a room that has genuinely
-        # gone quiet closes the lane and hands the screen back to Jarvis.
+        # gone quiet closes the lane and hands the screen back to HermesPortal.
         try:
             # Grace period: never close a lane that only just came up. Belt and
             # braces alongside markLive() — if the kiosk failed to stamp, the
@@ -1506,8 +1492,9 @@ def _idle_watchdog_loop():
             if started and time.time() - started < LANE_GRACE_SEC:
                 continue
             # If the browser itself is gone (renderer crash, Chrome killed),
-            # the lane must not linger "on": VACA stays muted and the household
-            # gets a dashboard whose Jarvis is deaf, with no visible cause.
+            # the lane must not linger "on": HermesPortal remains suspended
+            # and the household would be left with no active surface and no
+            # visible cause.
             # Two consecutive misses so a momentary CDP hiccup is not fatal.
             ok_tabs, tabs = cdp_list_tabs()
             if not ok_tabs or not cdp_find_chatgpt_tab(tabs):
@@ -1693,7 +1680,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # reproduced live 2026-08-03 when a second adb device (a phone on
         # USB) made cdp_forward fail. _stop_lane_locked is idempotent and
         # safe to call even when nothing actually started: force-stopping
-        # Chrome/relaunching VACA are no-ops if they were never touched, and
+        # Chrome/relaunching Hermes are no-ops if they were never touched, and
         # it always flips the boolean back off.
         def fail_closed(error: str) -> None:
             stop_res = _stop_lane_locked(f"start_failed:{error}")
@@ -1775,13 +1762,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         add_step("request_fullscreen", ok8, d8)
 
         # 9. Yield the microphone BEFORE asking ChatGPT for it. Android 9 gives
-        # the mic to ONE app: with VACA's wake-word listener capturing
-        # (src:VOICE_RECOGNITION), ChatGPT's getUserMedia track opens and reads
-        # pure silence — proven live 2026-08-02 (Chrome's capture lasted 142ms).
-        # This has to happen before the voice sequence, not after it.
-        ok9, d9 = ha_set_switch(VACA_MUTE_SWITCH, True)
-        add_step("vaca_mic_muted", ok9, d9)
-        time.sleep(1.5)
+        # the mic to ONE app: HermesPortal's VoiceService holds AudioRecord while running.
+        # Force-stop HermesPortal to free the mic before ChatGPT's getUserMedia; fail closed if it fails.
+        ok9, d9 = _suspend_hermes_for_chatgpt()
+        add_step("hermes_mic_released", ok9, d9)
+        if not ok9:
+            fail_closed("hermes_suspend_failed")
+            return
+        time.sleep(0.5)
 
         # 10. Drive ChatGPT into a live, orb-only voice call.
         try:
@@ -1798,10 +1786,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not voice_ok:
             # enter_voice_verified already retried once from a clean page.
             # Marking the lane "active" here anyway was the failure mode: a
-            # dead orb sat on the wall with VACA muted and the HA boolean on,
+            # dead orb sat on the wall with Hermes suspended and the HA boolean on,
             # looking identical to a healthy lane until the 60s+45s idle
             # watchdog eventually caught it. Fail closed instead — tear
-            # everything down now, return VACA's mic and the dashboard
+            # everything down now, return to HermesPortal
             # immediately, and report the real failure.
             add_step("voice_open_failed", False,
                      "call never came live after retry; closing lane instead of stranding it")
