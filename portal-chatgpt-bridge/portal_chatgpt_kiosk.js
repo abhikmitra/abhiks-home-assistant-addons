@@ -232,6 +232,11 @@
   }
 
   function applyKiosk() {
+    // Typed chat lives on chatgpt.com/, not /voice. Hiding .composer-parent
+    // there made a sent prompt invisible. Only orb-strip the voice URL.
+    if ((location.pathname || '').indexOf('/voice') === -1) {
+      return 'skip-text-page';
+    }
     var orb = orbEl();
     if (!orb) return 'no-orb';
     // Hide every sibling on the orb's ancestor path. Survives class renames.
@@ -323,6 +328,22 @@
     return 'live';
   };
 
+  function composerEl() {
+    return document.querySelector('#prompt-textarea')
+      || document.querySelector('[data-testid=prompt-textarea]')
+      || document.querySelector('[contenteditable=true]');
+  }
+
+  K.prepareTextMode = function () {
+    K.textMode = true;
+    K.kioskApplied = false;
+    overlayDone();
+    releaseKiosk();
+    chip();
+    K.markLive();
+    return 'text-ready';
+  };
+
   K.overlay = overlay;
   K.overlayDone = overlayDone;
   K.chip = chip;
@@ -331,6 +352,7 @@
   K.byLabel = byLabel;
   K.idleMs = function () { return Date.now() - K.lastActivityTs; };
   K.snapshot = function () {
+    var composer = !!composerEl();
     return {
       phase: K.phase,
       idleMs: K.idleMs(),
@@ -339,6 +361,8 @@
       everHeardMic: K.everHeardMic,
       everHeardSpeaker: K.everHeardSpeaker,
       kioskApplied: K.kioskApplied,
+      textMode: !!K.textMode,
+      textReady: !!(K.textMode || composer),
       // Two ChatGPT web UIs coexist (2026-08-03 update): the old one signals a
       // live call with an "End voice" button and has an explicit mic toggle;
       // the new one (entered via chatgpt.com/voice) signals it with the
@@ -352,6 +376,7 @@
       focusMode: !!byLabel(/exit focus mode/i),
       orbVisible: !!orbEl(),
       hasChip: !!document.getElementById(CHIP),
+      composerVisible: composer,
     };
   };
 

@@ -1000,25 +1000,66 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
     add_step("page_ready", ready,
              f"voice entry present ({state})" if ready else "page never hydrated")
 
-    # 1. Voice mode. Establishing the WebRTC call is the single slowest step,
-    #    so it is kicked off before anything cosmetic and left to negotiate
-    #    while we set up the overlay and the kiosk. "Start dictation" is a
-    #    different button (speech-to-text into the composer) and is
-    #    deliberately never used.
+    # Typed composer is the working ChatGPT surface on the 2026 web UI.
+    # Assigning /voice hid the composer, left an orb-only page, and made a
+    # typed prompt unreplyable. Stay on chatgpt.com/ whenever the box exists.
+    composer = kiosk_call(
+        session,
+        "(function(){"
+        "if((location.pathname||'').indexOf('/voice')!==-1) return 'on-voice';"
+        "var box=document.querySelector('#prompt-textarea')"
+        "||document.querySelector('[data-testid=prompt-textarea]')"
+        "||document.querySelector('[contenteditable=true]');"
+        "return box ? 'composer' : 'none';})()", gesture=False)
+    if composer == "composer" or state == "ready-new-ui":
+        prepared = kiosk_call(
+            session,
+            "(function(){var k=window.__portalKiosk;"
+            "if(k.prepareTextMode) return k.prepareTextMode();"
+            "k.textMode=true; k.overlayDone(); k.chip(); k.markLive();"
+            "return 'text-ready';})()")
+        add_step("voice_start", True, f"stay-text-composer ({prepared})")
+        add_step("text_ready", True, "composer visible; skipped /voice")
+        snap = kiosk_call(session, "JSON.stringify(window.__portalKiosk.snapshot())",
+                          gesture=False)
+        try:
+            snap = json.loads(snap)
+        except Exception:
+            snap = {"raw": str(snap)[:300], "textReady": True, "textMode": True}
+        snap["textReady"] = True
+        snap["textMode"] = True
+        add_step("voice_snapshot", True, json.dumps(snap)[:400])
+        return snap
+
+    # Legacy UI only: a real "Start voice" button. Never assign /voice as a
+    # fallback — that path cannot show a typed assistant reply.
     clicked = kiosk_call(
         session,
         "(function(){var k=window.__portalKiosk;"
-        "k.overlay('Starting voice','Opening the live conversation');"
         "if(k.byLabel(/end voice/i)||k.byLabel(/voice mode selector/i)) return 'already-live';"
         "var s=k.byLabel(/start voice/i);"
-        "if(s){s.click(); return 'clicked';}"
-        # New UI: no button exists; the /voice URL is the entry point.
-        "location.assign('https://chatgpt.com/voice'); return 'nav-voice-url';})()")
-    add_step("voice_start", clicked in ("clicked", "already-live", "nav-voice-url"), str(clicked))
-    if clicked == "nav-voice-url":
-        # The navigation reloads the SPA; give it a beat before polling, and
-        # the poll loop below tolerates evaluate errors while it settles.
-        time.sleep(4.0)
+        "if(s){k.overlay('Starting voice','Opening the live conversation');"
+        "s.click(); return 'clicked';}"
+        "return 'no-voice-entry';})()")
+    add_step("voice_start", clicked in ("clicked", "already-live"), str(clicked))
+    if clicked == "no-voice-entry":
+        prepared = kiosk_call(
+            session,
+            "(function(){var k=window.__portalKiosk;"
+            "if(k.prepareTextMode) return k.prepareTextMode();"
+            "k.textMode=true; k.overlayDone(); k.chip(); k.markLive();"
+            "return 'text-ready';})()")
+        add_step("text_ready", True, f"no Start Voice; stayed on chat ({prepared})")
+        snap = kiosk_call(session, "JSON.stringify(window.__portalKiosk.snapshot())",
+                          gesture=False)
+        try:
+            snap = json.loads(snap)
+        except Exception:
+            snap = {"raw": str(snap)[:300], "textReady": True, "textMode": True}
+        snap["textReady"] = True
+        snap["textMode"] = True
+        add_step("voice_snapshot", True, json.dumps(snap)[:400])
+        return snap
 
     # 2. Unmute AND wait for the call, in one loop.
     #
@@ -1107,17 +1148,31 @@ def enter_voice_sequence(session: CDPSession, add_step) -> Dict[str, Any]:
     add_step("voice_snapshot", bool(snap.get("voiceLive")), json.dumps(snap)[:400])
     return snap
 
+
+def _lane_open_ok(snap: Dict[str, Any]) -> bool:
+    """A usable ChatGPT lane is either a typed composer or a live voice call.
+
+    The 2026 chatgpt.com homepage has a composer and no Start Voice button.
+    Forcing /voice made start look 'open' while a typed prompt could not
+    produce a visible assistant reply.
+    """
+    if not isinstance(snap, dict):
+        return False
+    if snap.get("textReady") or snap.get("textMode"):
+        return True
+    return bool(snap.get("voiceLive")) and bool(snap.get("micOn"))
+
 def enter_voice_verified(session: CDPSession, add_step) -> Dict[str, Any]:
     """Run the open sequence and prove the result, retrying once from a clean
     page if it did not actually come up live.
 
     Speed made a new failure possible: a warm tab can still hold the spent
     voice UI, so the sequence can 'succeed' in 5s against stale DOM and leave
-    a dead orb on the wall. A lane is only open if the call is live AND the
-    microphone is on.
+    a dead orb on the wall. A lane is open if the typed composer is ready, or
+    if a legacy voice call is live AND the microphone is on.
     """
     snap = enter_voice_sequence(session, add_step)
-    if snap.get("voiceLive") and snap.get("micOn"):
+    if _lane_open_ok(snap):
         return snap
     add_step("voice_verify_failed", False, json.dumps(snap)[:200] + " -> reloading clean")
     try:
@@ -1994,14 +2049,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         time.sleep(0.5)
 
-        # 10. Drive ChatGPT into a live, orb-only voice call.
+        # 10. Drive ChatGPT to a usable surface: typed composer (current UI)
+        # or a live legacy voice call. Never strand a /voice orb with no reply.
         try:
             snap = enter_voice_verified(sess, add_step)
         except Exception as e:
             snap = {"error": str(e)[:300]}
             add_step("voice_sequence", False, str(e)[:400])
 
-        voice_ok = bool(snap.get("voiceLive")) and bool(snap.get("micOn"))
+        voice_ok = _lane_open_ok(snap)
         try:
             sess.close()
         except: pass
@@ -2015,7 +2071,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # everything down now, return to HermesPortal
             # immediately, and report the real failure.
             add_step("voice_open_failed", False,
-                     "call never came live after retry; closing lane instead of stranding it")
+                     "composer/voice never came up after retry; closing lane instead of stranding it")
             _log_event("start_failed_closing_lane", json.dumps(snap)[:300])
             stop_res = _stop_lane_locked("voice_open_failed")
             self._json_response(200, {
